@@ -1,0 +1,14 @@
+{
+  "name": "cc-status-bar",
+  "owner": { "name": "Haos" },
+  "metadata": {
+    "description": "A light status bar for Claude Code: model, reasoning effort, context window and usage limits."
+  },
+  "plugins": [
+    {
+      "name": "status-bar",
+      "source": "./",
+      "description": "Status line on the prompt footer: model, reasoning effort, context tokens, 5-hour and weekly limits."
+    }
+  ]
+}

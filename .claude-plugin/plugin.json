@@ -1,0 +1,7 @@
+{
+  "name": "status-bar",
+  "version": "0.4.0",
+  "description": "Status line on the prompt footer: model, reasoning effort, context tokens, 5-hour and weekly limits.",
+  "author": { "name": "Haos" },
+  "types": "./types/index.d.ts"
+}
