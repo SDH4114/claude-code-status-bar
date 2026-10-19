@@ -2,6 +2,9 @@
 
 A light status bar for Claude Code. It sits on the line under the prompt, next to `⏵⏵ auto mode on`, in the same color:
 
+
+![](image.png)
+
 ```
 ⏵⏵ auto mode on (shift+tab to cycle)  │  Sonnet 5.5 │ high │ ctx 14k/200k 7% │ 5h 4% ↻1h0m │ 7d 13% ↻3d4h
 ```
