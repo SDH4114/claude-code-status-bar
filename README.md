@@ -6,7 +6,7 @@ A light status bar for Claude Code. It sits on the line under the prompt, next t
 ![](image.png)
 
 ```
-⏵⏵ auto mode on (shift+tab to cycle)  │  Sonnet 5.5 │ high │ ctx 14k/200k 7% │ 5h 4% ↻1h0m │ 7d 13% ↻3d4h
+⏵⏵ auto mode on (shift+tab to cycle)  │  Sonnet 5.5 │ high │ ctx 14k/200k 7% │ $0.12 / $1.84 │ 5h 4% ↻1h0m │ 7d 13% ↻3d4h
 ```
 
 | Field | Meaning |
@@ -14,10 +14,13 @@ A light status bar for Claude Code. It sits on the line under the prompt, next t
 | `Sonnet 5.5` | current model (updates after `/model`) |
 | `high` | reasoning effort of the last request |
 | `ctx 14k/200k 7%` | context tokens used / window size, percent used |
+| `$0.12 / $1.84` | cost of the last answer / whole session, as `/cost` counts it (API list price; on a subscription it is the API equivalent, not a bill) |
 | `5h 4% ↻1h0m` | 5-hour usage limit and time until it resets |
 | `7d 13% ↻3d4h` | weekly usage limit and time until it resets |
 
 Limits show on a Claude subscription only, after the first model response.
+
+Model and effort changes from `/model` or `/effort` show within a second, without waiting for the next response.
 
 ## Install
 

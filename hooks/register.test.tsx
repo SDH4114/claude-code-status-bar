@@ -33,6 +33,25 @@ describe('prompt footer', () => {
     expect(drawn).toContain('warning')
   })
 
+  test('shows the session cost and the effort saved for the model', async ($, on) => {
+    on('clock.now', () => ({ value: Date.parse('2026-01-01T00:00:00Z') }))
+    on('session.model', () => ({ value: 'claude-opus-5-5' }))
+    on('session.usage', () => ({ value: { ...usage, cost: { usd: 1.5 } } }))
+    on('settings.read', () => ({ value: { modelSettings: { 'claude-opus-5-5': { effortLevel: 'max' } } } as never }))
+    on('command.run', () => ({ text: '' }))
+    on('ui.render', ($$, e) => {
+      const { Text } = $$.ui.resolve(e)
+      return <Text>{e.props.hint}</Text>
+    })
+
+    await $.command.run({ command: 'effort', args: '' } as never)
+    const ui = await $.ui.mount({ plugin: 'status-bar', surface: 'terminal', component: 'PromptHint', props })
+
+    const drawn = JSON.stringify(await ui.drawn())
+    expect(drawn).toContain('Opus 5.5 │ max')
+    expect(drawn).toContain('$1.50')
+  })
+
   test('leaves the hint alone before any reading', async ($, on) => {
     on('ui.render', ($$, e) => {
       const { Text } = $$.ui.resolve(e)

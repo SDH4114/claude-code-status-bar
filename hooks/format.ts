@@ -4,6 +4,13 @@ export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 
 const label: Record<string, string> = { five_hour: '5h', seven_day: '7d' }
 
+const levels = ['low', 'medium', 'high', 'xhigh', 'max']
+
+export const effortLevel = (text: unknown): string | undefined => {
+  const word = typeof text === 'string' ? text.trim().toLowerCase() : ''
+  return levels.includes(word) ? word : undefined
+}
+
 export const modelName = (id: string): string => {
   const m = /(opus|sonnet|haiku|fable)-(\d+)(?:-(\d+))?/i.exec(id)
   if (!m) return id.replace(/^claude-/, '')
@@ -23,12 +30,22 @@ export const until = (iso: string | undefined, now: number): string => {
   return ` ↻${min}m`
 }
 
+export const money = (usd: number): string =>
+  usd > 0 && usd < 0.01 ? '<$0.01' : usd >= 100 ? `$${Math.round(usd)}` : `$${usd.toFixed(2)}`
+
+// Last answer / session total; the session total alone before the first answer.
+export const spend = (usd: number | undefined, base: number | null): string => {
+  if (usd === undefined) return ''
+  return base === null ? money(usd) : `${money(Math.max(0, usd - base))} / ${money(usd)}`
+}
+
 export const formatLine = (
   model: string,
   effort: string,
   context: Context,
   limits: readonly Limit[],
   now: number,
+  cost = '',
 ): string => {
   const parts = [modelName(model)]
   if (effort) parts.push(effort)
@@ -37,6 +54,7 @@ export const formatLine = (
       ? `ctx –/${compact(context.window)}`
       : `ctx ${compact(context.tokens ?? 0)}/${compact(context.window)} ${Math.round(context.percent)}%`,
   )
+  if (cost) parts.push(cost)
   for (const r of limits) {
     const name = label[r.kind]
     if (name) parts.push(`${name} ${Math.round(r.percentUsed)}%${until(r.resetsAt, now)}`)
