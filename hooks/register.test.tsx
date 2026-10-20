@@ -19,7 +19,7 @@ describe('prompt footer', () => {
     on('prompt.submit', ($$, e) => e)
     on('ui.render', ($$, e) => {
       const { Text } = $$.ui.resolve(e)
-      return <Text>{e.props.hint}</Text>
+      return <Text>{(e.props as { hint: string }).hint}</Text>
     })
 
     await $.prompt.submit({ text: 'hi' } as never)
@@ -41,7 +41,7 @@ describe('prompt footer', () => {
     on('command.run', () => ({ text: '' }))
     on('ui.render', ($$, e) => {
       const { Text } = $$.ui.resolve(e)
-      return <Text>{e.props.hint}</Text>
+      return <Text>{(e.props as { hint: string }).hint}</Text>
     })
 
     await $.command.run({ command: 'effort', args: '' } as never)
@@ -55,7 +55,7 @@ describe('prompt footer', () => {
   test('leaves the hint alone before any reading', async ($, on) => {
     on('ui.render', ($$, e) => {
       const { Text } = $$.ui.resolve(e)
-      return <Text>{e.props.hint}</Text>
+      return <Text>{(e.props as { hint: string }).hint}</Text>
     })
 
     const ui = await $.ui.mount({ plugin: 'status-bar', surface: 'terminal', component: 'PromptHint', props })

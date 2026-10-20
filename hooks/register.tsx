@@ -43,6 +43,7 @@ async function poll($: Dollar): Promise<void> {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     $.ui.status(undefined)
+    await update($, base, () => null)
     seenSetting = await savedEffort($, await $.session.model())
     await draw($)
     ticker?.cancel()
@@ -72,6 +73,12 @@ export const register: Register = on => {
     if (level) await update($, effort, () => level)
     if (e.command === 'model' || e.command === 'effort') await poll($)
     return result
+  }).catch(($, e, next) => next(e))
+
+  on('session.end', async ($, e, next) => {
+    ticker?.cancel()
+    ticker = undefined
+    return next(e)
   }).catch(($, e, next) => next(e))
 
   on('session.measure', async ($, e, next) => {

@@ -14,8 +14,9 @@ export const effortLevel = (text: unknown): string | undefined => {
 export const modelName = (id: string): string => {
   const m = /(opus|sonnet|haiku|fable)-(\d+)(?:-(\d+))?/i.exec(id)
   if (!m) return id.replace(/^claude-/, '')
-  const name = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase()
-  return m[3] && m[3].length < 4 ? `${name} ${m[2]}.${m[3]}` : `${name} ${m[2]}`
+  const [, family = '', major = '', minor] = m
+  const name = family.charAt(0).toUpperCase() + family.slice(1).toLowerCase()
+  return minor && minor.length < 4 ? `${name} ${major}.${minor}` : `${name} ${major}`
 }
 
 export const compact = (n: number): string =>
