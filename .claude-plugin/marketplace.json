@@ -1,6 +1,6 @@
 {
   "name": "amikolabs.com",
-  "owner": { "name": "Haos" },
+  "owner": { "name": "amikolabs.com", "url": "https://amikolabs.com" },
   "metadata": {
     "description": "A light status bar for Claude Code: model, reasoning effort, context window, usage limits and git branch."
   },
