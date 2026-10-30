@@ -74,25 +74,23 @@ describe('prompt footer', () => {
     const { state } = world(on)
     state.branch = 'feature/status'
     await start($)
-    expect(await drawn($)).toContain('7d 13% │ git feature/status')
+    expect(await drawn($)).toContain('7d 13% │ feature/status')
   })
 
   test('shows a short commit for a detached HEAD', async ($, on) => {
     const { state } = world(on)
     state.branch = null
     await start($)
-    expect(await drawn($)).toContain('git (a1b2c3d)')
+    expect(await drawn($)).toContain('7d 13% │ (a1b2c3d)')
   })
 
   test('shows no branch outside a repository or without git', async ($, on) => {
     const { state } = world(on)
     await start($)
-    expect(await drawn($)).not.toContain('git ')
+    expect(await drawn($)).toContain('7d 13%"')
     state.branch = 'missing'
     await start($)
-    const text = await drawn($)
-    expect(text).toContain('Sonnet 5.5')
-    expect(text).not.toContain('git ')
+    expect(await drawn($)).toContain('7d 13%"')
   })
 
   test('picks up a branch switch within a few seconds without running git every tick', async ($, on) => {
@@ -104,7 +102,7 @@ describe('prompt footer', () => {
     await clock.advance(1000)
     expect(state.gitCalls).toBe(calls)
     await clock.advance(5000)
-    expect(await drawn($)).toContain('git dev')
+    expect(await drawn($)).toContain('│ dev')
   })
 
   test('keeps ticking when the first reading at session start fails', async ($, on) => {
@@ -175,12 +173,13 @@ describe('prompt footer', () => {
     expect(await drawn($)).toContain('Sonnet 5.5 │ low')
   })
 
-  test('preserves the footer drawn beneath the plugin', async ($, on) => {
+  test('keeps the hint and the status in one truncating row', async ($, on) => {
     world(on)
     await $.prompt.submit({ text: 'hi' } as never)
     const text = await drawn($)
-    expect(text).toContain('original footer')
+    expect(text).toContain('? for shortcuts')
     expect(text).toContain('Sonnet 5.5')
+    expect(text).toContain('truncate-end')
   })
 
   test('does not execute a command twice if its subsequent redraw fails', async ($, on) => {

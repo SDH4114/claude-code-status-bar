@@ -74,6 +74,6 @@ export const formatLine = (
     const name = label[r.kind]
     if (name) parts.push(`${name} ${Math.round(r.percentUsed)}%${until(r.resetsAt, now)}`)
   }
-  if (branch) parts.push(`git ${branchText(branch)}`)
+  if (branch) parts.push(branchText(branch))
   return parts.join(' │ ')
 }

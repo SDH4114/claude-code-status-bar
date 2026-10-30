@@ -126,7 +126,7 @@ describe('formatLine', () => {
   })
   test('puts the branch last', () => {
     expect(formatLine('claude-opus-4', '', { window: 200000 }, [], now, '', 'main')).toBe(
-      'Opus 4 │ ctx –/200k │ git main',
+      'Opus 4 │ ctx –/200k │ main',
     )
   })
   test('puts the cost after the context', () => {

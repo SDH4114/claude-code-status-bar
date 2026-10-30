@@ -141,17 +141,16 @@ export const register: Register = on => {
     const text = await read($, line)
     if (!text) return next(e)
 
-    const { Box, Text } = $.ui.resolve(e)
-    const hint = await next(e)
+    const { Text } = $.ui.resolve(e)
 
+    // One Text, so the footer stays a single row and is cut at the edge; the engine's own
+    // line tree (next(e)) fills the row and would push the status onto a second one.
     return (
-      <Box flexDirection="row">
-        {hint}
+      <Text wrap="truncate-end">
+        <Text dimColor>{e.props.hint}</Text>
         <Text dimColor>{'  │  '}</Text>
-        <Text color="warning" wrap="truncate-end">
-          {text}
-        </Text>
-      </Box>
+        <Text color="warning">{text}</Text>
+      </Text>
     )
   }).catch(($, e, next) => next(e))
 }
