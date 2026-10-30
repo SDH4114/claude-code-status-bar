@@ -78,18 +78,30 @@ async function tick($: Dollar): Promise<void> {
   }
 }
 
+// A new chat: the first start, and a /clear or /resume, which end the old one without a
+// session.start. The ticker is started anew too: it keeps the $ it was started with.
+async function begin($: Dollar): Promise<void> {
+  // Started first, so a failing read below cannot leave the footer frozen.
+  ticker?.cancel()
+  ticker = $.clock.every(1000, () => void tick($))
+  await update($, base, () => null)
+  seenModel = await $.session.model()
+  seenSetting = await savedEffort($, seenModel)
+  await update($, effort, () => seenSetting ?? '')
+  await refreshBranch($, true)
+  await draw($)
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    // Started first, so a failing read below cannot leave the footer frozen.
-    ticker?.cancel()
-    ticker = $.clock.every(1000, () => void tick($))
     $.ui.status(undefined)
-    await update($, base, () => null)
-    seenModel = await $.session.model()
-    seenSetting = await savedEffort($, seenModel)
-    await update($, effort, () => seenSetting ?? '')
-    await refreshBranch($, true)
-    await draw($)
+    await begin($)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // Fires inside the new chat, before the settings hooks; a failure here runs them once, from .catch.
+  on('classic.SessionStart', async ($, e, next) => {
+    if (e.source === 'clear' || e.source === 'resume') await begin($)
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -122,19 +134,12 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('session.end', async ($, e, next) => {
-    const result = await next(e)
-    // /clear ends the chat but not the process, and no session.start follows: keep ticking
-    // and start the new chat clean, or the footer stays empty until the first prompt.
-    if (e.reason === 'clear') {
-      await update($, base, () => null)
-      await update($, effort, () => '')
-      seenModel = ''
-      await tick($)
-      return result
+    // /clear and /resume go on in this process: classic.SessionStart restarts the ticker.
+    if (e.reason !== 'clear' && e.reason !== 'resume') {
+      ticker?.cancel()
+      ticker = undefined
     }
-    ticker?.cancel()
-    ticker = undefined
-    return result
+    return next(e)
   }).catch(($, e, next) => next(e))
 
   on('session.measure', async ($, e, next) => {

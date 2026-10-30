@@ -2,7 +2,8 @@ export type Context = { tokens?: number; window: number; percent?: number }
 
 export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 
-const label: Record<string, string> = { five_hour: '5h', seven_day: '7d' }
+// The 5-hour limit first, then the weekly one; the footer tells them apart by position.
+const shown = ['five_hour', 'seven_day']
 
 const levels = ['low', 'medium', 'high', 'xhigh', 'max']
 
@@ -70,9 +71,9 @@ export const formatLine = (
       : `ctx ${context.tokens === undefined ? '–' : compact(context.tokens)}/${compact(context.window)} ${Math.round(context.percent)}%`,
   )
   if (cost) parts.push(cost)
-  for (const r of limits) {
-    const name = label[r.kind]
-    if (name) parts.push(`${name} ${Math.round(r.percentUsed)}%${until(r.resetsAt, now)}`)
+  for (const kind of shown) {
+    const r = limits.find(l => l.kind === kind)
+    if (r) parts.push(`${Math.round(r.percentUsed)}%${until(r.resetsAt, now)}`)
   }
   if (branch) parts.push(branchText(branch))
   return parts.join(' │ ')

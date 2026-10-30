@@ -43,6 +43,7 @@ function world(on: On) {
   on('ui.status', () => ({ value: undefined }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+  on('classic.SessionStart', () => ({}))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.step', async function* ($, e) {
     return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [] } as never
@@ -74,23 +75,23 @@ describe('prompt footer', () => {
     const { state } = world(on)
     state.branch = 'feature/status'
     await start($)
-    expect(await drawn($)).toContain('7d 13% │ feature/status')
+    expect(await drawn($)).toContain('│ 13% │ feature/status')
   })
 
   test('shows a short commit for a detached HEAD', async ($, on) => {
     const { state } = world(on)
     state.branch = null
     await start($)
-    expect(await drawn($)).toContain('7d 13% │ (a1b2c3d)')
+    expect(await drawn($)).toContain('│ 13% │ (a1b2c3d)')
   })
 
   test('shows no branch outside a repository or without git', async ($, on) => {
     const { state } = world(on)
     await start($)
-    expect(await drawn($)).toContain('7d 13%"')
+    expect(await drawn($)).toContain('│ 13%"')
     state.branch = 'missing'
     await start($)
-    expect(await drawn($)).toContain('7d 13%"')
+    expect(await drawn($)).toContain('│ 13%"')
   })
 
   test('picks up a branch switch within a few seconds without running git every tick', async ($, on) => {
@@ -197,16 +198,43 @@ describe('prompt footer', () => {
     expect(await drawn($)).toContain('Sonnet 5.5 │ ctx')
   })
 
-  test('keeps the footer after /clear, which ends the session with no new start', async ($, on) => {
+  // /clear and /resume end the chat with session.end and start the next one with the classic SessionStart alone.
+  const restart = async ($: Engine, source: 'clear' | 'resume') => {
+    await $.session.end({ reason: source, sessionId: 's1', resume: {} } as never)
+    await $.classic.SessionStart({ source })
+  }
+
+  test('redraws the footer right after /clear with the new chat clean', async ($, on) => {
+    const { state } = world(on)
+    state.settings = { effortLevel: 'medium' }
+    await start($)
+    await $.turn.start({ turnId: 't1' } as never)
+    await step($, 'high')
+    state.usage.cost = { usd: 0 }
+    await restart($, 'clear')
+    const text = await drawn($)
+    expect(text).toContain('Sonnet 5.5 │ medium │ ctx')
+    expect(text).toContain('│ $0.00 │')
+  })
+
+  test('keeps ticking after /clear and /resume', async ($, on) => {
     const { state, clock } = world(on)
     await start($)
-    await step($, 'high')
-    await $.session.end({ reason: 'clear', sessionId: 's1', resume: {} } as never)
-    state.usage.cost = { usd: 0 }
-    await clock.advance(1000)
-    const text = await drawn($)
-    expect(text).toContain('Sonnet 5.5 │ ctx')
-    expect(text).toContain('│ $0.00 │')
+    for (const source of ['clear', 'resume'] as const) {
+      await restart($, source)
+      state.model = source === 'clear' ? 'claude-opus-5-5' : 'claude-haiku-5-5'
+      await clock.advance(1000)
+      expect(await drawn($)).toContain(source === 'clear' ? 'Opus 5.5' : 'Haiku 5.5')
+    }
+  })
+
+  test('stops ticking when the session really ends', async ($, on) => {
+    const { state, clock } = world(on)
+    await start($)
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 's1', resume: {} } as never)
+    state.model = 'claude-opus-5-5'
+    await clock.advance(5000)
+    expect(await drawn($)).toContain('Sonnet 5.5')
   })
 
   test('adds a yellow status line after the hint once a prompt was sent', async ($, on) => {
@@ -225,8 +253,7 @@ describe('prompt footer', () => {
     const drawn = JSON.stringify(await ui.drawn())
     expect(drawn).toContain('? for shortcuts')
     expect(drawn).toContain('Sonnet 5.5')
-    expect(drawn).toContain('5h 4%')
-    expect(drawn).toContain('7d 13%')
+    expect(drawn).toContain('│ 4% │ 13%')
     expect(drawn).toContain('warning')
   })
 

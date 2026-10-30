@@ -122,7 +122,14 @@ describe('formatLine', () => {
       ],
       now,
     )
-    expect(text).toBe('Sonnet 5.5 │ high │ ctx 14k/200k 7% │ 5h 4% ↻1h0m │ 7d 13%')
+    expect(text).toBe('Sonnet 5.5 │ high │ ctx 14k/200k 7% │ 4% ↻1h0m │ 13%')
+  })
+  test('keeps the 5-hour limit before the weekly one whatever order they come in', () => {
+    const limits = [
+      { kind: 'seven_day', percentUsed: 37 },
+      { kind: 'five_hour', percentUsed: 2 },
+    ]
+    expect(formatLine('claude-sonnet-5-5', '', { window: 200000 }, limits, 0)).toBe('Sonnet 5.5 │ ctx –/200k │ 2% │ 37%')
   })
   test('puts the branch last', () => {
     expect(formatLine('claude-opus-4', '', { window: 200000 }, [], now, '', 'main')).toBe(
