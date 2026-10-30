@@ -5,10 +5,10 @@ import { effortLevel, effortText, formatLine, spend } from './format'
 
 type Dollar = Parameters<Hook<'session.measure'>>[0]
 
-const effort = atom({ plugin: 'status-bar', key: 'effort' } as const, '')
-const line = atom({ plugin: 'status-bar', key: 'line' } as const, '')
+const effort = atom({ plugin: 'cc-status-bar', key: 'effort' } as const, '')
+const line = atom({ plugin: 'cc-status-bar', key: 'line' } as const, '')
 // Session cost when the current answer began; null before the first one.
-const base = atom({ plugin: 'status-bar', key: 'base' } as const, null)
+const base = atom({ plugin: 'cc-status-bar', key: 'base' } as const, null)
 
 type Saved = { effortLevel?: string; modelSettings?: Record<string, { effortLevel?: string }> }
 

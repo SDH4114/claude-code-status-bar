@@ -61,7 +61,7 @@ function world(on: On) {
 
 const start = ($: Engine) => $.session.start({ cwd: '/project', surface: 'terminal', isInteractive: true })
 const drawn = async ($: Engine) => JSON.stringify(await (await $.ui.mount({
-  plugin: 'status-bar', surface: 'terminal', component: 'PromptHint', props,
+  plugin: 'cc-status-bar', surface: 'terminal', component: 'PromptHint', props,
 })).drawn())
 const step = async ($: Engine, effort: 'low' | 'high', agentId?: string) => {
   for await (const _ of $.turn.step({
@@ -220,7 +220,7 @@ describe('prompt footer', () => {
     })
 
     await $.prompt.submit({ text: 'hi' } as never)
-    const ui = await $.ui.mount({ plugin: 'status-bar', surface: 'terminal', component: 'PromptHint', props })
+    const ui = await $.ui.mount({ plugin: 'cc-status-bar', surface: 'terminal', component: 'PromptHint', props })
 
     const drawn = JSON.stringify(await ui.drawn())
     expect(drawn).toContain('? for shortcuts')
@@ -242,7 +242,7 @@ describe('prompt footer', () => {
     })
 
     await $.command.run({ command: 'effort', args: '' } as never)
-    const ui = await $.ui.mount({ plugin: 'status-bar', surface: 'terminal', component: 'PromptHint', props })
+    const ui = await $.ui.mount({ plugin: 'cc-status-bar', surface: 'terminal', component: 'PromptHint', props })
 
     const drawn = JSON.stringify(await ui.drawn())
     expect(drawn).toContain('Opus 5.5 │ max')
@@ -255,7 +255,7 @@ describe('prompt footer', () => {
       return <Text>{(e.props as { hint: string }).hint}</Text>
     })
 
-    const ui = await $.ui.mount({ plugin: 'status-bar', surface: 'terminal', component: 'PromptHint', props })
+    const ui = await $.ui.mount({ plugin: 'cc-status-bar', surface: 'terminal', component: 'PromptHint', props })
 
     expect(JSON.stringify(await ui.drawn())).not.toContain('Sonnet')
   })

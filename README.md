@@ -31,7 +31,7 @@ In Claude Code:
 
 ```
 /plugin marketplace add SDH4114/claude-code-status-bar
-/plugin install status-bar@cc-status-bar
+/plugin install cc-status-bar@amikolabs.com
 ```
 
 Then run `/reload-plugins` or restart Claude Code.
@@ -40,19 +40,19 @@ Or from a shell:
 
 ```sh
 claude plugin marketplace add SDH4114/claude-code-status-bar
-claude plugin install status-bar@cc-status-bar
+claude plugin install cc-status-bar@amikolabs.com
 ```
 
 ## Update
 
 ```
-/plugin marketplace update cc-status-bar
+/plugin marketplace update amikolabs.com
 ```
 
 ## Uninstall
 
 ```
-/plugin uninstall status-bar@cc-status-bar
+/plugin uninstall cc-status-bar@amikolabs.com
 ```
 
 ## Develop
