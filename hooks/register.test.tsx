@@ -42,7 +42,7 @@ function world(on: On) {
   on('settings.read', () => ({ value: state.settings as never }))
   on('ui.status', () => ({ value: undefined }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('session.end', () => ({} as never))
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.step', async function* ($, e) {
     return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [] } as never
@@ -195,6 +195,18 @@ describe('prompt footer', () => {
     await step($, 'high')
     await start($)
     expect(await drawn($)).toContain('Sonnet 5.5 │ ctx')
+  })
+
+  test('keeps the footer after /clear, which ends the session with no new start', async ($, on) => {
+    const { state, clock } = world(on)
+    await start($)
+    await step($, 'high')
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: {} } as never)
+    state.usage.cost = { usd: 0 }
+    await clock.advance(1000)
+    const text = await drawn($)
+    expect(text).toContain('Sonnet 5.5 │ ctx')
+    expect(text).toContain('│ $0.00 │')
   })
 
   test('adds a yellow status line after the hint once a prompt was sent', async ($, on) => {

@@ -122,9 +122,19 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('session.end', async ($, e, next) => {
+    const result = await next(e)
+    // /clear ends the chat but not the process, and no session.start follows: keep ticking
+    // and start the new chat clean, or the footer stays empty until the first prompt.
+    if (e.reason === 'clear') {
+      await update($, base, () => null)
+      await update($, effort, () => '')
+      seenModel = ''
+      await tick($)
+      return result
+    }
     ticker?.cancel()
     ticker = undefined
-    return next(e)
+    return result
   }).catch(($, e, next) => next(e))
 
   on('session.measure', async ($, e, next) => {
