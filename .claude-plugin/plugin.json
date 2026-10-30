@@ -1,7 +1,7 @@
 {
   "name": "status-bar",
-  "version": "0.5.0",
-  "description": "Status line on the prompt footer: model, reasoning effort, context tokens, cost per answer and session, 5-hour and weekly limits.",
+  "version": "0.6.0",
+  "description": "Status line on the prompt footer: model, reasoning effort, context tokens, cost per answer and session, 5-hour and weekly limits, git branch.",
   "author": { "name": "Haos" },
   "types": "./types/index.d.ts"
 }
