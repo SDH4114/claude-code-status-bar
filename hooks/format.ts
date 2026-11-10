@@ -1,4 +1,5 @@
-export type Context = { tokens?: number; window: number; percent?: number }
+// window is absent for a subagent on another model than the session's: its size is not known here.
+export type Context = { tokens?: number; window?: number; percent?: number }
 
 export type Limit = { kind: string; percentUsed: number; resetsAt?: string }
 
@@ -14,7 +15,7 @@ export const effortLevel = (text: unknown): string | undefined => {
 
 // claude-opus-4-1-20250805 and the older claude-3-5-sonnet-20241022; a date is never a version.
 export const modelName = (id: string): string => {
-  const m = /(opus|sonnet|haiku|fable)-(\d{1,2})(?:-(\d{1,2}))?(?!\d)/i.exec(id)
+  const m = /(opus|sonnet|haiku|fable|mythos)-(\d{1,2})(?:-(\d{1,2}))?(?!\d)/i.exec(id)
   const old = m ? null : /claude-(\d{1,2})(?:-(\d{1,2}))?-(opus|sonnet|haiku)/i.exec(id)
   const [family, major, minor] = m ? [m[1], m[2], m[3]] : old ? [old[3], old[1], old[2]] : []
   if (!family || !major) return id.replace(/^claude-/, '')
@@ -54,6 +55,59 @@ export const spend = (usd: number | undefined, base: number | null): string => {
   return base === null ? money(usd) : `${money(Math.max(0, usd - base))} / ${money(usd)}`
 }
 
+// What one response's tokens count for: the four numbers the API reports.
+export type Tokens = {
+  input_tokens: number
+  output_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+}
+
+// Context a response was answered over, as the status line counts it: the whole input side.
+export const promptTokens = (t: Tokens): number =>
+  t.input_tokens + t.cache_read_input_tokens + t.cache_creation_input_tokens
+
+// API list prices in $ per million tokens (platform.claude.com pricing, as of 2026-11).
+// cacheRead where the model's differs from 0.1x input. The engine's own per-agent cost is not
+// exposed to plugins, so a subagent's spend is estimated from its tokens with this table.
+type Price = { input: number; output: number; cacheRead?: number }
+const prices: Record<string, Price> = {
+  'Fable 5.2': { input: 8, output: 40, cacheRead: 0.2 },
+  'Mythos 5.2': { input: 8, output: 40, cacheRead: 0.2 },
+  'Fable 5.1': { input: 10, output: 50, cacheRead: 0.25 },
+  'Mythos 5.1': { input: 10, output: 50, cacheRead: 0.25 },
+  'Fable 5': { input: 10, output: 50, cacheRead: 1 },
+  'Mythos 5': { input: 10, output: 50, cacheRead: 1 },
+  'Opus 5.5': { input: 4, output: 20, cacheRead: 0.2 },
+  'Opus 5': { input: 5, output: 25 },
+  'Opus 4.8': { input: 5, output: 25 },
+  'Opus 4.7': { input: 5, output: 25 },
+  'Opus 4.6': { input: 5, output: 25 },
+  'Sonnet 5.5': { input: 2, output: 10, cacheRead: 0.1 },
+  'Sonnet 5': { input: 2, output: 10 },
+  'Sonnet 4.6': { input: 3, output: 15 },
+  'Haiku 5.5': { input: 0.1, output: 0.5 },
+  'Haiku 4.5': { input: 1, output: 5 },
+}
+// Haiku 5.5 bills a prompt over 100K tokens at a higher rate.
+const haikuLong: Price = { input: 0.5, output: 2.5 }
+
+// Dollars one response cost at list price; undefined for a model the table does not know.
+// Cache writes are counted at the 5-minute rate (1.25x input): the usage does not say which TTL.
+export const tokenCost = (model: string, t: Tokens): number | undefined => {
+  const name = modelName(model)
+  const base = name === 'Haiku 5.5' && promptTokens(t) > 100_000 ? haikuLong : prices[name]
+  if (!base) return undefined
+  const read = base.cacheRead ?? base.input * 0.1
+  return (
+    (t.input_tokens * base.input +
+      t.cache_creation_input_tokens * base.input * 1.25 +
+      t.cache_read_input_tokens * read +
+      t.output_tokens * base.output) /
+    1_000_000
+  )
+}
+
 export const formatLine = (
   model: string,
   effort: string,
@@ -65,10 +119,13 @@ export const formatLine = (
 ): string => {
   const parts = [modelName(model)]
   if (effort) parts.push(effort)
+  const used = context.tokens === undefined ? '–' : compact(context.tokens)
   parts.push(
-    context.percent === undefined
-      ? `ctx –/${compact(context.window)}`
-      : `ctx ${context.tokens === undefined ? '–' : compact(context.tokens)}/${compact(context.window)} ${Math.round(context.percent)}%`,
+    context.window === undefined
+      ? `ctx ${used}`
+      : context.percent === undefined
+        ? `ctx –/${compact(context.window)}`
+        : `ctx ${used}/${compact(context.window)} ${Math.round(context.percent)}%`,
   )
   if (cost) parts.push(cost)
   for (const kind of shown) {

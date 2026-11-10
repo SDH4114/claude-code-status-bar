@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { branchText, compact, effortLevel, effortText, formatLine, modelName, money, spend, until } from './format'
+import { branchText, compact, effortLevel, effortText, formatLine, modelName, money, spend, tokenCost, until } from './format'
 
 describe('effortLevel', () => {
   test('accepts known levels', () => {
@@ -143,5 +143,35 @@ describe('formatLine', () => {
   })
   test('skips effort when unknown and shows a dash before the first response', () => {
     expect(formatLine('claude-opus-4', '', { window: 200000 }, [], now)).toBe('Opus 4 │ ctx –/200k')
+  })
+})
+
+// Hundredths of a cent: float sums of rates are not exact.
+const cents = (usd: number | undefined) => (usd === undefined ? usd : Math.round(usd * 10_000))
+
+describe('tokenCost', () => {
+  const t = (input: number, output: number, read = 0, write = 0) => ({
+    input_tokens: input, output_tokens: output, cache_read_input_tokens: read, cache_creation_input_tokens: write,
+  })
+  test('prices each kind of token at its own rate', () => {
+    // 1M each on Opus 5.5: 4 + 20 + 0.2 (cache read) + 5 (cache write, 1.25x)
+    expect(cents(tokenCost('claude-opus-5-5', t(1e6, 1e6, 1e6, 1e6)))).toBe(cents(29.2))
+  })
+  test('uses 0.1x input for cache reads where the model has no rate of its own', () => {
+    expect(cents(tokenCost('claude-opus-4-8', t(0, 0, 1e6)))).toBe(cents(0.5))
+  })
+  test('bills a long Haiku 5.5 prompt at the higher rate', () => {
+    expect(cents(tokenCost('claude-haiku-5-5', t(100_000, 0)))).toBe(cents(0.01))
+    expect(cents(tokenCost('claude-haiku-5-5', t(200_000, 0)))).toBe(cents(0.1))
+  })
+  test('reads a 1M-context id and leaves an unknown model unpriced', () => {
+    expect(cents(tokenCost('claude-sonnet-5-5[1m]', t(1e6, 0)))).toBe(cents(2))
+    expect(tokenCost('some-other-model', t(1e6, 0))).toBe(undefined)
+  })
+})
+
+describe('formatLine without a known window', () => {
+  test('shows the tokens alone', () => {
+    expect(formatLine('claude-haiku-5-5', 'low', { tokens: 2000 }, [], 0)).toBe('Haiku 5.5 │ low │ ctx 2k')
   })
 })

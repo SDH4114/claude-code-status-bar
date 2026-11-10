@@ -21,6 +21,22 @@ A light status bar for Claude Code. It sits on the line under the prompt, next t
 
 Limits show on a Claude subscription only, after the first model response.
 
+### Per-agent line
+
+When you open a subagent's or teammate's transcript from the tasks list, the line switches to that agent within a second:
+
+```
+scout │ Opus 5.5 │ low │ ctx 30k │ ≈$0.12 / $0.32 │ 4% ↻1h0m │ 13% ↻3d4h │ feat/scout
+```
+
+- the agent's name, model and effort of its last request;
+- `ctx` is its own context; the window and percent show only when it runs on the session's model;
+- `≈` marks an estimate: the cost is counted from the agent's tokens at API list price (cache writes at the 5-minute rate, fast mode not counted), so it can differ from `/cost`. Last turn / all of its turns;
+- the branch of its own directory (a worktree agent shows its worktree's branch);
+- limits are the account's, the same for every agent.
+
+Back on the main conversation the line shows the session again; the session cost there includes its agents.
+
 Model and effort changes from `/model` or `/effort` show within a second, without waiting for the next response. A branch switch shows within about 5 seconds.
 
 Works on macOS, Linux and Windows; the branch needs `git` on `PATH`. On a narrow terminal the line is cut at the right edge instead of wrapping.

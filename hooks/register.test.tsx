@@ -25,10 +25,20 @@ function world(on: On) {
     // null: detached HEAD; undefined: not a repository; 'missing': no git on PATH.
     branch: undefined as string | null | undefined | 'missing',
     gitCalls: 0,
+    // Branches of directories other than the session's, by cwd.
+    dirs: {} as Record<string, string>,
+    // What a step answers as usage.
+    stepUsage: null as null | Record<string, number | string>,
   }
   on('process.run', ($, e) => {
     state.gitCalls++
     if (state.branch === 'missing') throw new Error('spawn git ENOENT')
+    const dir = e.init?.cwd
+    if (dir !== undefined) {
+      const name = state.dirs[dir]
+      if (e.argv[1] === 'symbolic-ref' && name) return { value: { exitCode: 0, stdout: `${name}\n`, stderr: '' } as never }
+      return { value: { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository' } as never }
+    }
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '' } as never })
     const fail = { value: { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository' } as never }
     if (e.argv[1] === 'symbolic-ref') return typeof state.branch === 'string' ? ok(`${state.branch}\r\n`) : fail
@@ -46,7 +56,7 @@ function world(on: On) {
   on('classic.SessionStart', () => ({}))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.step', async function* ($, e) {
-    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [] } as never
+    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], usage: state.stepUsage } as never
   })
   on('command.run', () => {
     state.commands++
@@ -64,11 +74,24 @@ const start = ($: Engine) => $.session.start({ cwd: '/project', surface: 'termin
 const drawn = async ($: Engine) => JSON.stringify(await (await $.ui.mount({
   plugin: 'cc-status-bar', surface: 'terminal', component: 'PromptHint', props,
 })).drawn())
-const step = async ($: Engine, effort: 'low' | 'high', agentId?: string) => {
+const step = async ($: Engine, effort: 'low' | 'high', agentId?: string, model = 'claude-sonnet-5-5') => {
   for await (const _ of $.turn.step({
-    turnId: 't1', index: 0, model: 'claude-sonnet-5-5', messageCount: 1, effort, agentId,
+    turnId: 't1', index: 0, model, messageCount: 1, effort, agentId,
   })) void _
 }
+// Puts an agent's transcript (or, with none, the main one) on screen, as the tasks list does.
+const view = async ($: Engine, agentId?: string) => {
+  await $.ui.mount({
+    plugin: 'cc-status-bar', surface: 'terminal', component: 'AbovePrompt',
+    props: {
+      hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80,
+      scroll: { offset: 0, bodyRows: 10 }, view: agentId === undefined ? {} : { agentId },
+    },
+  } as never)
+}
+const tokens = (model: string, input: number, output: number) => ({
+  model, input_tokens: input, output_tokens: output, cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+})
 
 describe('prompt footer', () => {
   test('shows the git branch of the working copy', async ($, on) => {
@@ -274,6 +297,83 @@ describe('prompt footer', () => {
     const drawn = JSON.stringify(await ui.drawn())
     expect(drawn).toContain('Opus 5.5 │ max')
     expect(drawn).toContain('$1.50')
+  })
+
+  test('shows the viewed agent its own model, effort, context and cost', async ($, on) => {
+    const { state, clock } = world(on)
+    await start($)
+    await step($, 'high')
+    // 30k in, 10k out on Opus 5.5: 30000 * 4 / 1e6 + 10000 * 20 / 1e6 = $0.32
+    state.stepUsage = tokens('claude-opus-5-5', 30_000, 10_000)
+    await $.turn.start({ turnId: 'a', agentId: 'agent-1' } as never)
+    await step($, 'low', 'agent-1', 'claude-opus-5-5')
+    await view($, 'agent-1')
+    await clock.advance(1000)
+    const text = await drawn($)
+    expect(text).toContain('Opus 5.5 │ low │ ctx 30k │ ≈$0.32 / $0.32 │ 4% │ 13%')
+    expect(text).not.toContain('Sonnet')
+  })
+
+  test('goes back to the session line when the main conversation is viewed', async ($, on) => {
+    const { state, clock } = world(on)
+    await start($)
+    await step($, 'high')
+    state.stepUsage = tokens('claude-opus-5-5', 30_000, 10_000)
+    await step($, 'low', 'agent-1', 'claude-opus-5-5')
+    await view($, 'agent-1')
+    await clock.advance(1000)
+    await view($)
+    await clock.advance(1000)
+    expect(await drawn($)).toContain('Sonnet 5.5 │ high │ ctx 14k/200k 7% │ $1.50')
+  })
+
+  test('keeps two agents apart', async ($, on) => {
+    const { state, clock } = world(on)
+    await start($)
+    state.stepUsage = tokens('claude-sonnet-5-5', 50_000, 0)
+    await step($, 'high', 'a1')
+    state.stepUsage = tokens('claude-haiku-5-5', 2_000, 0)
+    await step($, 'low', 'a2', 'claude-haiku-5-5')
+    await view($, 'a1')
+    await clock.advance(1000)
+    // Same model as the session: its window is known.
+    expect(await drawn($)).toContain('Sonnet 5.5 │ high │ ctx 50k/200k 25% │ ≈$0.10')
+    await view($, 'a2')
+    await clock.advance(1000)
+    expect(await drawn($)).toContain('Haiku 5.5 │ low │ ctx 2k │ ≈<$0.01')
+  })
+
+  test('counts an agent turn apart from its earlier ones', async ($, on) => {
+    const { state, clock } = world(on)
+    await start($)
+    state.stepUsage = tokens('claude-sonnet-5-5', 0, 100_000) // $1.00
+    await $.turn.start({ turnId: 'a', agentId: 'a1' } as never)
+    await step($, 'high', 'a1')
+    state.stepUsage = tokens('claude-sonnet-5-5', 0, 50_000) // $0.50
+    await $.turn.start({ turnId: 'b', agentId: 'a1' } as never)
+    await step($, 'high', 'a1')
+    await view($, 'a1')
+    await clock.advance(1000)
+    expect(await drawn($)).toContain('≈$0.50 / $1.50')
+  })
+
+  test('names the agent and shows the branch of its own directory', async ($, on) => {
+    const { state, clock } = world(on)
+    state.branch = 'main'
+    state.dirs['/wt/scout'] = 'feat/scout'
+    on('agent.spawn', () => ({ agentId: 'a1', model: 'claude-sonnet-5-5' }))
+    await start($)
+    await $.agent.spawn({ prompt: 'look', description: 'Scan repo', name: 'scout', cwd: '/wt/scout' } as never)
+    await step($, 'high', 'a1')
+    await view($, 'a1')
+    await clock.advance(1000)
+    await clock.advance(1000)
+    const text = await drawn($)
+    expect(text).toContain('scout │ Sonnet 5.5 │ high')
+    expect(text).toContain('│ feat/scout')
+    await view($)
+    await clock.advance(1000)
+    expect(await drawn($)).toContain('│ main')
   })
 
   test('leaves the hint alone before any reading', async ($, on) => {
