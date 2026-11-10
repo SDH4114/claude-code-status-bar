@@ -1,6 +1,6 @@
 # claude-code-status-bar
 
-A light status bar for Claude Code. It sits on the line under the prompt, next to `⏵⏵ auto mode on`, in the same color:
+A light status bar for Claude Code. It sits on the line under the prompt, next to `⏵⏵ auto mode on`, in the same color. Subagents and teammates get a line of their own (see [Per-agent line](#per-agent-line)):
 
 
 ![](bar.png)
@@ -23,17 +23,26 @@ Limits show on a Claude subscription only, after the first model response.
 
 ### Per-agent line
 
-When you open a subagent's or teammate's transcript from the tasks list, the line switches to that agent within a second:
+Each subagent and teammate has its own line. When you open an agent's transcript from the tasks list, the footer switches to that agent within a second and shows its own model, effort, context, cost and branch. Two agents running side by side, one on Haiku and one on Sonnet:
+
+![](agent-haiku.png)
+
+![](agent-sonnet.png)
 
 ```
-scout │ Opus 5.5 │ low │ ctx 30k │ ≈$0.12 / $0.32 │ 4% ↻1h0m │ 13% ↻3d4h │ feat/scout
+Sonnet longer test … │ Sonnet 5.5 │ medium │ ctx 74k │ ≈$0.23 / $0.23 │ 19% ↻1h34m │ 21% ↻4d23h │ main
 ```
 
-- the agent's name, model and effort of its last request;
-- `ctx` is its own context; the window and percent show only when it runs on the session's model;
-- `≈` marks an estimate: the cost is counted from the agent's tokens at API list price (cache writes at the 5-minute rate, fast mode not counted), so it can differ from `/cost`. Last turn / all of its turns;
-- the branch of its own directory (a worktree agent shows its worktree's branch);
-- limits are the account's, the same for every agent.
+| Field | Meaning |
+| --- | --- |
+| `Sonnet longer test …` | the agent's name (its `name`, else the task description), cut at 20 characters |
+| `Sonnet 5.5` / `medium` | the model and effort of the agent's last request |
+| `ctx 74k` | the agent's own context; `/window` and percent are added when it runs on the session's model |
+| `≈$0.23 / $0.23` | estimated cost of the agent's last turn / all its turns |
+| `19% ↻1h34m`, `21% ↻4d23h` | the account's limits, the same for every agent |
+| `main` | the branch of the agent's own directory (a worktree agent shows its worktree's branch) |
+
+`≈` marks an estimate: Claude Code does not give plugins a cost per agent, so it is counted from the agent's tokens at API list price (cache writes at the 5-minute rate, fast mode not counted) and can differ from `/cost`. A model missing from the price table shows no cost.
 
 Back on the main conversation the line shows the session again; the session cost there includes its agents.
 
