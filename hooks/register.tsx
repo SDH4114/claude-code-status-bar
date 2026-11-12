@@ -3,6 +3,8 @@ import type { Hook, Register } from 'claude-code'
 
 import { branchText, effortLevel, effortText, formatLine, promptTokens, spend, tokenCost } from './format'
 import type { Tokens } from './format'
+import { aggregate, emptyLog, formatStats, parseLog, recordLimits, recordTokens } from './stats'
+import type { Log } from './stats'
 
 type Dollar = Parameters<Hook<'session.measure'>>[0]
 
@@ -39,6 +41,14 @@ const agents = new Map<string, AgentStats>()
 // The agent whose transcript is on screen; undefined for the main conversation.
 let viewed: string | undefined
 
+// Daily usage: this session's record, kept in its own file and saved at most every 10 s.
+let log: Log = emptyLog()
+let logPath: string | undefined
+let dirty = false
+let savedAt = 0
+// The last limit reading written, per kind, so an unchanged one is not written again.
+const lastLimit = new Map<string, string>()
+
 const agentOf = (id: string): AgentStats => {
   let a = agents.get(id)
   if (!a) {
@@ -51,10 +61,11 @@ const agentOf = (id: string): AgentStats => {
 async function draw($: Dollar): Promise<void> {
   const [model, usage] = await Promise.all([$.session.model(), $.session.usage()])
   const now = await $.clock.now()
+  if (recordLimits(log, now, usage.rateLimits, lastLimit)) dirty = true
   const agent = viewed === undefined ? undefined : agents.get(viewed)
   let text: string
   if (agent) {
-    // Limits are the account's, shared by every agent; the rest is the agent's own.
+    // The limits are the account's, already on the main line: an agent's shows its own figures only.
     const sameModel = agent.model === model
     const context = {
       tokens: agent.tokens,
@@ -62,7 +73,7 @@ async function draw($: Dollar): Promise<void> {
       percent: sameModel && agent.tokens !== undefined ? (agent.tokens / usage.context.window) * 100 : undefined,
     }
     const cost = agent.usd === undefined ? '' : `≈${spend(agent.usd, agent.base)}`
-    const status = formatLine(agent.model || model, agent.effort, context, usage.rateLimits, now, cost, branchOf(agent.cwd))
+    const status = formatLine(agent.model || model, agent.effort, context, [], now, cost, branchOf(agent.cwd))
     text = agent.label ? `${branchText(agent.label, 20)} │ ${status}` : status
   } else {
     const cost = spend(usage.cost?.usd, await read($, base))
@@ -102,6 +113,72 @@ const savedEffort = async ($: Dollar, model: string): Promise<string | undefined
   return effortLevel(all?.modelSettings?.[model]?.effortLevel) ?? effortLevel(all?.effortLevel)
 }
 
+// Where the daily records live: one file per session under the Claude config directory.
+async function usageDir($: Dollar): Promise<string | undefined> {
+  const config = await $.env.get('CLAUDE_CONFIG_DIR')
+  if (config) return `${config}/cc-status-bar/usage`
+  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
+  return home ? `${home}/.claude/cc-status-bar/usage` : undefined
+}
+
+async function save($: Dollar, force = false): Promise<void> {
+  if (!dirty || !logPath) return
+  const now = await $.clock.now()
+  if (!force && now - savedAt < 10_000) return
+  savedAt = now
+  dirty = false
+  await $.fs.write(logPath, JSON.stringify(log)).catch(() => {
+    dirty = true
+  })
+}
+
+// A resumed session goes on with its own file instead of starting it over. A file there that
+// cannot be read is left as it is and this session writes beside it.
+async function openLog($: Dollar): Promise<void> {
+  const dir = await usageDir($)
+  const id = await $.session.id()
+  let path = dir && id ? `${dir}/${id}.json` : undefined
+  let next = emptyLog()
+  if (path && (await $.fs.exists(path))) {
+    try {
+      next = parseLog(await $.fs.read(path))
+    } catch {
+      path = `${dir}/${id}-${await $.clock.now()}.json`
+    }
+  }
+  // Swapped in one step after the reads: a tick saving meanwhile still writes the old file.
+  logPath = path
+  log = next
+  dirty = false
+  lastLimit.clear()
+}
+
+function countResponse(now: number, usage: (Tokens & { model: string }) | null, model: string): void {
+  if (!usage) return
+  recordTokens(log, now, usage.model || model, usage)
+  dirty = true
+}
+
+async function statsText($: Dollar, args: string): Promise<string> {
+  await save($, true)
+  const dir = await usageDir($)
+  if (!dir) return 'No home directory: cannot find the usage records.'
+  const entries = await $.fs.list(dir).catch(() => [])
+  const logs: Log[] = []
+  for (const f of entries) {
+    if (f.kind !== 'file' || !f.name.endsWith('.json')) continue
+    const text = await $.fs.read(`${dir}/${f.name}`).catch(() => undefined)
+    if (text === undefined) continue
+    try {
+      logs.push(parseLog(text))
+    } catch {
+      // A broken file is skipped rather than hiding every other day.
+    }
+  }
+  const n = Number.parseInt(args.trim(), 10)
+  return formatStats(aggregate(logs), n > 0 ? n : undefined)
+}
+
 async function poll($: Dollar): Promise<void> {
   const model = await $.session.model()
   const setting = await savedEffort($, model)
@@ -113,6 +190,7 @@ async function poll($: Dollar): Promise<void> {
   await refreshBranch($)
   // Time until a reset changes even when the model and settings stay the same.
   await draw($)
+  await save($)
 }
 
 // A slow git or settings read must not let ticks pile up behind it.
@@ -134,6 +212,15 @@ async function begin($: Dollar): Promise<void> {
   // Started first, so a failing read below cannot leave the footer frozen.
   ticker?.cancel()
   ticker = $.clock.every(1000, () => void tick($))
+  // The old chat's last responses go to its own file before the new one opens.
+  await save($, true).catch(() => {})
+  await openLog($).catch(() => {
+    logPath = undefined
+    log = emptyLog()
+  })
+  await $.command
+    .register({ name: 'usage-stats', description: 'Tokens per model and limits used, by day', argumentHint: '[days]' })
+    .catch(() => {})
   await update($, base, () => null)
   // A new chat has none of the old one's agents.
   agents.clear()
@@ -180,6 +267,7 @@ export const register: Register = on => {
       try {
         const used = result.usage as (Tokens & { model: string }) | null
         if (used) {
+          countResponse(await $.clock.now(), used, a.model)
           a.model = used.model || a.model
           a.tokens = promptTokens(used)
           const usd = tokenCost(a.model, used)
@@ -193,7 +281,14 @@ export const register: Register = on => {
     }
     await update($, effort, () => effortText(e.effort))
     await draw($)
-    return yield* next(e)
+    const result = yield* next(e)
+    // After the request, as for an agent: a failure here must not send it again.
+    try {
+      countResponse(await $.clock.now(), result.usage as (Tokens & { model: string }) | null, e.model)
+    } catch {
+      // Lost from the daily record; the footer is unaffected.
+    }
+    return result
   }).catch(async function* ($, e, next) {
     return yield* next(e)
   })
@@ -236,7 +331,12 @@ export const register: Register = on => {
     return result
   }).catch(($, e, next) => next(e))
 
+  on('command.run', { command: 'usage-stats' }, async ($, e) => ({ text: await statsText($, e.args ?? '') })).catch(
+    ($, e, next) => next(e),
+  )
+
   on('session.end', async ($, e, next) => {
+    await save($, true).catch(() => {})
     // /clear and /resume go on in this process: classic.SessionStart restarts the ticker.
     if (e.reason !== 'clear' && e.reason !== 'resume') {
       ticker?.cancel()

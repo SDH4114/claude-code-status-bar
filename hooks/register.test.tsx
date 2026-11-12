@@ -14,8 +14,8 @@ const usage = {
 
 const props = { isDraft: false, isWorking: false, hint: '? for shortcuts' }
 
-function world(on: On) {
-  const clock = mock.clock(on, { now: Date.parse('2026-01-01T00:00:00Z') })
+function world(on: On, now = Date.parse('2026-01-01T00:00:00Z')) {
+  const clock = mock.clock(on, { now })
   const state = {
     model: 'claude-sonnet-5-5',
     settings: {} as { effortLevel?: string; modelSettings?: Record<string, { effortLevel?: string }> },
@@ -29,7 +29,28 @@ function world(on: On) {
     dirs: {} as Record<string, string>,
     // What a step answers as usage.
     stepUsage: null as null | Record<string, number | string>,
+    sessionId: 's1',
+    // The file system the daily records go to, by absolute path.
+    files: {} as Record<string, string>,
   }
+  on('session.id', () => ({ value: state.sessionId }))
+  on('env.get', ($, e) => ({ value: e.name === 'HOME' ? '/home/me' : undefined }))
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('fs.write', ($, e) => {
+    state.files[e.path] = e.text
+    return { value: undefined }
+  })
+  on('fs.read', ($, e) => {
+    const text = state.files[e.path]
+    if (text === undefined) throw new Error(`ENOENT: ${e.path}`)
+    return { value: text }
+  })
+  on('fs.exists', ($, e) => ({ value: e.path in state.files }))
+  on('fs.list', ($, e) => ({
+    value: Object.keys(state.files)
+      .filter(f => f.startsWith(`${e.path}/`))
+      .map(f => ({ name: f.slice(e.path.length + 1), kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false })),
+  }))
   on('process.run', ($, e) => {
     state.gitCalls++
     if (state.branch === 'missing') throw new Error('spawn git ENOENT')
@@ -310,7 +331,9 @@ describe('prompt footer', () => {
     await view($, 'agent-1')
     await clock.advance(1000)
     const text = await drawn($)
-    expect(text).toContain('Opus 5.5 │ low │ ctx 30k │ ≈$0.32 / $0.32 │ 4% │ 13%')
+    // The account's limits stay on the main line only.
+    expect(text).toContain('Opus 5.5 │ low │ ctx 30k │ ≈$0.32 / $0.32"')
+    expect(text).not.toContain('4%')
     expect(text).not.toContain('Sonnet')
   })
 
@@ -385,5 +408,184 @@ describe('prompt footer', () => {
     const ui = await $.ui.mount({ plugin: 'cc-status-bar', surface: 'terminal', component: 'PromptHint', props })
 
     expect(JSON.stringify(await ui.drawn())).not.toContain('Sonnet')
+  })
+})
+
+describe('usage stats', () => {
+  const dir = '/home/me/.claude/cc-status-bar/usage'
+  // Midday UTC: the same local date in nearly every time zone.
+  const noon = Date.parse('2026-01-01T12:00:00Z')
+  const stats = async ($: Engine, args = '') => (await $.command.run({ command: 'usage-stats', args } as never)).text ?? ''
+
+  test('counts the session and its agents per model for the day', async ($, on) => {
+    const { state } = world(on, noon)
+    await start($)
+    state.stepUsage = tokens('claude-sonnet-5-5', 1000, 500)
+    await step($, 'high')
+    await step($, 'high')
+    state.stepUsage = tokens('claude-opus-5-5', 30_000, 10_000)
+    await step($, 'low', 'agent-1', 'claude-opus-5-5')
+    const text = await stats($)
+    expect(text).toContain('2026-01-01')
+    expect(text).toMatch(/Sonnet 5\.5 +2 req +in 2k +out 1k/)
+    expect(text).toMatch(/Opus 5\.5 +1 req +in 30k +out 10k .*≈\$0\.32/)
+    expect(text).toMatch(/all +3 req/)
+    expect(Object.keys(state.files)).toEqual([`${dir}/s1.json`])
+  })
+
+  test('adds up the limit a day used across readings and a new window', async ($, on) => {
+    const { state, clock } = world(on, noon)
+    const r5 = '2026-01-01T15:00:00Z'
+    const set = (five: number, week: number, reset = r5) => {
+      state.usage = { ...state.usage, rateLimits: [
+        { kind: 'five_hour', percentUsed: five, resetsAt: reset },
+        { kind: 'seven_day', percentUsed: week, resetsAt: '2026-01-05T00:00:00Z' },
+      ] }
+    }
+    set(10, 20)
+    await start($)
+    set(25, 22)
+    await clock.advance(1000)
+    // A new 5-hour window counts from 0.
+    set(5, 23, '2026-01-01T20:00:00Z')
+    await clock.advance(1000)
+    const text = await stats($)
+    expect(text).toContain('5h +20% (peak 25%) · week +3% (peak 23%)')
+  })
+
+  test('merges the files of several sessions and keeps a resumed one', async ($, on) => {
+    const { state } = world(on, noon)
+    state.files[`${dir}/old.json`] = JSON.stringify({ v: 1, limits: [], days: {
+      '2025-12-31': { 'Haiku 5.5': { requests: 4, input: 100, output: 50, cacheRead: 0, cacheWrite: 0, usd: 0.01 } },
+    } })
+    state.files[`${dir}/s1.json`] = JSON.stringify({ v: 1, limits: [], days: {
+      '2026-01-01': { 'Sonnet 5.5': { requests: 1, input: 10, output: 10, cacheRead: 0, cacheWrite: 0, usd: 0.0001 } },
+    } })
+    state.files[`${dir}/broken.json`] = '{'
+    await start($)
+    state.stepUsage = tokens('claude-sonnet-5-5', 10, 10)
+    await step($, 'high')
+    const text = await stats($)
+    expect(text).toMatch(/2026-01-01[^]*Sonnet 5\.5 +2 req[^]*2025-12-31[^]*Haiku 5\.5 +4 req/)
+    expect(text).toContain('Total 2025-12-31 … 2026-01-01')
+    expect(await stats($, '1')).not.toContain('Haiku')
+  })
+
+  test('says so when nothing is recorded', async ($, on) => {
+    const { state } = world(on, noon)
+    state.usage = { ...state.usage, rateLimits: [] }
+    await start($)
+    expect(await stats($)).toContain('No usage recorded yet')
+  })
+
+  test('counts nothing for a stale reading of an older window from another session', async ($, on) => {
+    const { state } = world(on, noon)
+    const sample = (h: number, percent: number, resets: string) =>
+      [noon + h * 3_600_000, 'five_hour', percent, resets]
+    // A: 80% of the window ending 13:00. B: the next window. A again, after /clear: its stale 80%.
+    state.files[`${dir}/a.json`] = JSON.stringify({ v: 1, days: {}, limits: [
+      sample(-3, 70, '2026-01-01T13:00:00Z'), sample(-2, 80, '2026-01-01T13:00:00Z'),
+      sample(1.5, 80, '2026-01-01T13:00:00Z'),
+    ] })
+    state.files[`${dir}/b.json`] = JSON.stringify({ v: 1, days: {}, limits: [
+      sample(1, 5, '2026-01-01T18:00:00Z'), sample(2, 10, '2026-01-01T18:00:00Z'),
+    ] })
+    state.usage = { ...state.usage, rateLimits: [] }
+    await start($)
+    // +10 to 80, then a new window from 0 to 10.
+    expect(await stats($)).toContain('5h +20% (peak 80%)')
+  })
+
+  test('takes a reset time a few seconds off as the same window', async ($, on) => {
+    const { state } = world(on, noon)
+    state.files[`${dir}/a.json`] = JSON.stringify({ v: 1, days: {}, limits: [
+      [noon, 'seven_day', 40, '2026-01-05T00:04:59Z'],
+      [noon + 1, 'seven_day', 41, '2026-01-05T00:05:01Z'],
+      [noon + 2, 'seven_day', 42, '2026-01-05T00:04:59Z'],
+    ] })
+    state.usage = { ...state.usage, rateLimits: [] }
+    await start($)
+    expect(await stats($)).toContain('week +2% (peak 42%)')
+  })
+
+  test('does not record a reading of a window that has already reset', async ($, on) => {
+    const { state } = world(on, noon)
+    state.usage = { ...state.usage, rateLimits: [{ kind: 'five_hour', percentUsed: 80, resetsAt: '2026-01-01T11:00:00Z' }] }
+    await start($)
+    expect(await stats($)).toContain('No usage recorded yet')
+  })
+
+  test('keeps the good parts of a damaged file', async ($, on) => {
+    const { state } = world(on, noon)
+    state.files[`${dir}/bad.json`] = JSON.stringify({ v: 1,
+      days: {
+        '2026-01-01': { 'Opus 5.5': { requests: 2, input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, __proto__x: 5, Junk: {} },
+        'not a day': {}, '2025-12-30': null,
+      },
+      limits: [null, 5, ['x'], [noon, 'five_hour', 'ten', '']],
+    })
+    state.files[`${dir}/null.json`] = 'null'
+    state.usage = { ...state.usage, rateLimits: [] }
+    await start($)
+    const text = await stats($)
+    expect(text).toMatch(/Opus 5\.5 +2 req/)
+    expect(text).not.toContain('NaN')
+    expect(text).not.toContain('Junk')
+    expect(({} as Record<string, unknown>).requests).toBeUndefined()
+  })
+
+  test('lines the columns up for any size of number', async ($, on) => {
+    const { state } = world(on, noon)
+    state.files[`${dir}/a.json`] = JSON.stringify({ v: 1, limits: [], days: { '2026-01-01': {
+      'Opus 5.5': { requests: 123456, input: 123_456_789, output: 5, cacheRead: 0, cacheWrite: 0, usd: 1 },
+      'Sonnet 5.5': { requests: 1, input: 1, output: 123_456_789, cacheRead: 0, cacheWrite: 0, usd: 0.5 },
+    } } })
+    state.usage = { ...state.usage, rateLimits: [] }
+    await start($)
+    const rows = (await stats($)).split('\n').filter(l => / req /.test(l))
+    const at = (l: string, word: string) => l.indexOf(word) + word.length
+    expect(new Set(rows.map(l => at(l, ' req'))).size).toBe(1)
+    expect(new Set(rows.map(l => l.search(/out \S+/) + l.match(/out \S+/)![0].length)).size).toBe(1)
+  })
+
+  test('goes on in the file of a resumed session and starts a new one after /clear', async ($, on) => {
+    const { state } = world(on, noon)
+    state.files[`${dir}/s2.json`] = JSON.stringify({ v: 1, limits: [], days: {
+      '2026-01-01': { 'Sonnet 5.5': { requests: 5, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+    } })
+    await start($)
+    state.stepUsage = tokens('claude-sonnet-5-5', 10, 10)
+    await step($, 'high')
+    await $.session.end({ reason: 'resume', sessionId: 's1', resume: {} } as never)
+    state.sessionId = 's2'
+    await $.classic.SessionStart({ source: 'resume' } as never)
+    await step($, 'high')
+    await stats($)
+    const days = (f: string) => JSON.parse(state.files[`${dir}/${f}.json`]!).days['2026-01-01']['Sonnet 5.5'].requests
+    expect(days('s1')).toBe(1)
+    expect(days('s2')).toBe(6)
+  })
+
+  test('writes beside a file it cannot read instead of over it', async ($, on) => {
+    const { state } = world(on, noon)
+    state.files[`${dir}/s1.json`] = '{cut off'
+    await start($)
+    state.stepUsage = tokens('claude-sonnet-5-5', 10, 10)
+    await step($, 'high')
+    await stats($)
+    expect(state.files[`${dir}/s1.json`]).toBe('{cut off')
+    expect(Object.keys(state.files)).toContain(`${dir}/s1-${noon}.json`)
+  })
+
+  test('reads a bad day count as all days', async ($, on) => {
+    const { state } = world(on, noon)
+    state.files[`${dir}/a.json`] = JSON.stringify({ v: 1, limits: [], days: {
+      '2025-12-30': { 'Haiku 5.5': { requests: 1, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+      '2025-12-31': { 'Haiku 5.5': { requests: 1, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+    } })
+    state.usage = { ...state.usage, rateLimits: [] }
+    await start($)
+    for (const arg of ['abc', '0', '-3']) expect(await stats($, arg)).toContain('2025-12-30')
+    expect(await stats($, '1')).not.toContain('2025-12-30')
   })
 })
