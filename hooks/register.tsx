@@ -3,7 +3,19 @@ import type { Hook, Register } from 'claude-code'
 
 import { branchText, effortLevel, effortText, formatLine, promptTokens, spend, tokenCost } from './format'
 import type { Tokens } from './format'
-import { aggregate, emptyLog, formatStats, parseLog, recordLimits, recordTokens } from './stats'
+import {
+  aggregate,
+  byMonth,
+  emptyLog,
+  formatStats,
+  isEmptyLog,
+  mergeLog,
+  monthBefore,
+  monthFile,
+  parseLog,
+  recordLimits,
+  recordTokens,
+} from './stats'
 import type { Log } from './stats'
 
 type Dollar = Parameters<Hook<'session.measure'>>[0]
@@ -41,11 +53,18 @@ const agents = new Map<string, AgentStats>()
 // The agent whose transcript is on screen; undefined for the main conversation.
 let viewed: string | undefined
 
-// Daily usage: this session's record, kept in its own file and saved at most every 10 s.
-let log: Log = emptyLog()
+// Daily usage: this chat's record, kept in a file of its own and saved at most every 10 s.
+// onDisk is what the file holds, fresh what came since; the file gets both on the next save.
+let onDisk: Log = emptyLog()
+let fresh: Log = emptyLog()
+// The file, and what its name starts with: <dir>/<session id>.
 let logPath: string | undefined
-let dirty = false
+let logStem: string | undefined
 let savedAt = 0
+// When the file was last written; 0 before the first write.
+let wroteAt = 0
+// Saves run one after another: two at once would each write onDisk plus their own batch.
+let saving: Promise<void> = Promise.resolve()
 // The last limit reading written, per kind, so an unchanged one is not written again.
 const lastLimit = new Map<string, string>()
 
@@ -61,7 +80,7 @@ const agentOf = (id: string): AgentStats => {
 async function draw($: Dollar): Promise<void> {
   const [model, usage] = await Promise.all([$.session.model(), $.session.usage()])
   const now = await $.clock.now()
-  if (recordLimits(log, now, usage.rateLimits, lastLimit)) dirty = true
+  recordLimits(fresh, now, usage.rateLimits, lastLimit)
   const agent = viewed === undefined ? undefined : agents.get(viewed)
   let text: string
   if (agent) {
@@ -121,61 +140,235 @@ async function usageDir($: Dollar): Promise<string | undefined> {
   return home ? `${home}/.claude/cc-status-bar/usage` : undefined
 }
 
-async function save($: Dollar, force = false): Promise<void> {
-  if (!dirty || !logPath) return
+// A file this long unwritten is left to the tidy-up (it takes files idle 24 h): the chat goes
+// on in a new one, so the two never touch the same file.
+const handOffAfter = 20 * 3_600_000
+
+function save($: Dollar, force = false): Promise<void> {
+  const run = () => saveNow($, force)
+  saving = saving.then(run, run)
+  return saving
+}
+
+async function saveNow($: Dollar, force: boolean): Promise<void> {
+  if (!logPath || isEmptyLog(fresh)) return
   const now = await $.clock.now()
   if (!force && now - savedAt < 10_000) return
   savedAt = now
-  dirty = false
-  await $.fs.write(logPath, JSON.stringify(log)).catch(() => {
-    dirty = true
-  })
+  const pending = fresh
+  fresh = emptyLog()
+  try {
+    // Idle long enough for a tidy-up to take it, or already taken (merged into its month):
+    // what it held is the tidy-up's now, and the rest goes to a new file.
+    if (!isEmptyLog(onDisk) && (now - wroteAt > handOffAfter || !(await $.fs.exists(logPath)))) {
+      logPath = `${logStem}-${now}.json`
+      onDisk = emptyLog()
+    }
+    const path = logPath
+    const next = emptyLog()
+    mergeLog(next, onDisk)
+    mergeLog(next, pending)
+    await $.fs.write(path, JSON.stringify(next))
+    if (path === logPath) {
+      onDisk = next
+      wroteAt = now
+    }
+  } catch {
+    mergeLog(pending, fresh)
+    fresh = pending
+  }
 }
 
-// A resumed session goes on with its own file instead of starting it over. A file there that
-// cannot be read is left as it is and this session writes beside it.
+// Every run of a chat (a start, /clear, /resume) gets a file of its own: a name is never
+// used twice, so a month's list of merged files can never match a newer one.
 async function openLog($: Dollar): Promise<void> {
   const dir = await usageDir($)
   const id = await $.session.id()
-  let path = dir && id ? `${dir}/${id}.json` : undefined
-  let next = emptyLog()
-  if (path && (await $.fs.exists(path))) {
-    try {
-      next = parseLog(await $.fs.read(path))
-    } catch {
-      path = `${dir}/${id}-${await $.clock.now()}.json`
-    }
-  }
-  // Swapped in one step after the reads: a tick saving meanwhile still writes the old file.
-  logPath = path
-  log = next
-  dirty = false
+  const now = await $.clock.now()
+  logStem = dir && id ? `${dir}/${id}` : undefined
+  logPath = logStem ? `${logStem}-${now}.json` : undefined
+  onDisk = emptyLog()
+  fresh = emptyLog()
+  wroteAt = 0
   lastLimit.clear()
 }
 
 function countResponse(now: number, usage: (Tokens & { model: string }) | null, model: string): void {
   if (!usage) return
-  recordTokens(log, now, usage.model || model, usage)
-  dirty = true
+  recordTokens(fresh, now, usage.model || model, usage)
+}
+
+const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1)
+
+// Only names this plugin writes are read, merged or deleted: a session file
+// (<session id>.json, <session id>-<ms>.json) or a month (YYYY-MM.json).
+const sessionFile = /^[0-9A-Za-z-]+\.json$/
+const isOurs = (f: { name: string; kind: string; isLink: boolean }) =>
+  f.kind === 'file' && !f.isLink && (sessionFile.test(f.name) || monthFile.test(f.name))
+
+const gone = async ($: Dollar, path: string) => !(await $.fs.exists(path).catch(() => true))
+
+// $.fs cannot delete. rm on macOS and Linux; on Windows rm is there only with Git's tools, so
+// PowerShell is tried whenever the file is still there. The path goes in the environment, not
+// the command line, so no character in it is read as part of a command.
+async function remove($: Dollar, path: string): Promise<boolean> {
+  await $.process.run(['rm', '-f', '--', path], { timeoutMs: 5000 }).catch(() => undefined)
+  if (await gone($, path)) return true
+  await $.process
+    .run(['powershell', '-NoProfile', '-NonInteractive', '-Command', 'Remove-Item -LiteralPath $env:CC_STATUS_BAR_FILE -Force'], {
+      env: { CC_STATUS_BAR_FILE: path.replace(/\//g, '\\') },
+      timeoutMs: 15_000,
+    })
+    .catch(() => undefined)
+  return gone($, path)
+}
+
+const keepMonths = 6
+const tidyEvery = 6 * 3_600_000
+// A session file this long unwritten is done with (its chat goes on in a new one after 20 h).
+const mergeAfter = 24 * 3_600_000
+
+// Merges session files older than a day into one file per month and deletes them, then deletes
+// months past the last 6. At most every 6 hours, from one process at a time.
+async function tidy($: Dollar): Promise<void> {
+  const dir = await usageDir($)
+  if (!dir || !logPath) return
+  const now = await $.clock.now()
+  const lock = `${dir}/tidy.lock`
+  const readLock = async (): Promise<{ at?: number; token?: string }> => {
+    try {
+      return JSON.parse(await $.fs.read(lock)) as { at?: number; token?: string }
+    } catch {
+      return {}
+    }
+  }
+  const held = await readLock()
+  // A lock from the future (a clock set back) does not hold.
+  if (typeof held.at === 'number' && held.at <= now && now - held.at < tidyEvery) return
+  // Not atomic: a second process that slips in here is caught by reading the lock back.
+  const token = baseName(logPath)
+  await $.fs.write(lock, JSON.stringify({ at: now, token }))
+  await $.clock.sleep(200)
+  if ((await readLock()).token !== token) return
+
+  const oldest = monthBefore(now, keepMonths - 1)
+  const entries = (await $.fs.list(dir)).filter(isOurs)
+  // What goes into each month, by the session file it comes from.
+  const into = new Map<string, { name: string; part: Log }[]>()
+  const parted = new Map<string, string[]>()
+  for (const f of entries) {
+    if (monthFile.test(f.name) || f.name === baseName(logPath) || now - f.mtimeMs < mergeAfter) continue
+    let log: Log
+    try {
+      log = parseLog(await $.fs.read(`${dir}/${f.name}`))
+    } catch {
+      continue
+    }
+    const months: string[] = []
+    for (const [m, part] of byMonth(log)) {
+      if (m < oldest) continue
+      months.push(m)
+      const list = into.get(m) ?? []
+      list.push({ name: f.name, part })
+      into.set(m, list)
+    }
+    parted.set(f.name, months)
+  }
+  // Each month is read again just before it is written, and a file it already lists is not
+  // added twice: a delete that failed, or another process's tidy-up, cannot count a file twice.
+  const failed = new Set<string>()
+  for (const [m, parts] of into) {
+    const path = `${dir}/${m}.json`
+    try {
+      const log = (await $.fs.exists(path)) ? parseLog(await $.fs.read(path)) : emptyLog()
+      const listed = new Set(log.merged ?? [])
+      for (const { name, part } of parts) {
+        if (listed.has(name)) continue
+        mergeLog(log, part)
+        listed.add(name)
+      }
+      log.merged = [...listed]
+      await $.fs.write(path, JSON.stringify(log))
+    } catch {
+      // Unreadable or unwritable: nothing of it is deleted, so nothing is lost.
+      for (const { name } of parts) failed.add(name)
+    }
+  }
+  // A session file is deleted only once every month it reaches holds its part.
+  const deleted = new Set<string>()
+  for (const name of parted.keys()) {
+    if (!failed.has(name) && (await remove($, `${dir}/${name}`))) deleted.add(name)
+  }
+  // A deleted file needs no mention; one still there stays listed, so it is not counted twice.
+  if (deleted.size > 0) {
+    for (const m of into.keys()) {
+      const path = `${dir}/${m}.json`
+      try {
+        const log = parseLog(await $.fs.read(path))
+        const left = (log.merged ?? []).filter(n => !deleted.has(n))
+        if (left.length === (log.merged ?? []).length) continue
+        if (left.length > 0) log.merged = left
+        else delete log.merged
+        await $.fs.write(path, JSON.stringify(log))
+      } catch {
+        // Still listed: harmless, the file is gone.
+      }
+    }
+  }
+  for (const f of entries) {
+    const m = monthFile.exec(f.name)?.[1]
+    if (m && m < oldest) await remove($, `${dir}/${f.name}`)
+  }
 }
 
 async function statsText($: Dollar, args: string): Promise<string> {
   await save($, true)
   const dir = await usageDir($)
   if (!dir) return 'No home directory: cannot find the usage records.'
-  const entries = await $.fs.list(dir).catch(() => [])
-  const logs: Log[] = []
+  const entries = (await $.fs.list(dir).catch(() => [])).filter(isOurs)
+  const sessions = new Map<string, Log>()
+  const months = new Map<string, Log>()
   for (const f of entries) {
-    if (f.kind !== 'file' || !f.name.endsWith('.json')) continue
     const text = await $.fs.read(`${dir}/${f.name}`).catch(() => undefined)
     if (text === undefined) continue
     try {
-      logs.push(parseLog(text))
+      const log = parseLog(text)
+      const m = monthFile.exec(f.name)?.[1]
+      if (m) months.set(m, log)
+      else sessions.set(f.name, log)
     } catch {
       // A broken file is skipped rather than hiding every other day.
     }
   }
-  return formatStats(aggregate(logs), args, await $.clock.now())
+  const now = await $.clock.now()
+  const oldest = monthBefore(now, keepMonths - 1)
+  // A session file still on disk that a month lists (its delete failed, or the tidy-up stopped
+  // before it) counts only for the months that do not list it yet; one they all hold is stuck.
+  const stuck = new Set<string>()
+  const logs: Log[] = [...months.values()]
+  for (const [name, log] of sessions) {
+    const listedBy = (m: string) => months.get(m)?.merged?.includes(name) ?? false
+    const parts = [...byMonth(log)]
+    if (!parts.some(([m]) => listedBy(m))) {
+      logs.push(log)
+      continue
+    }
+    const rest = parts.filter(([m]) => !listedBy(m) && m >= oldest)
+    for (const [, part] of rest) logs.push(part)
+    if (rest.length === 0) stuck.add(name)
+  }
+  // Months past the kept ones are still there only when deleting them failed.
+  for (const m of months.keys()) if (m < oldest) stuck.add(`${m}.json`)
+  const text = formatStats(aggregate(logs), args, now)
+  return stuck.size === 0 ? text : `${text}\n\n${stuckText(dir, [...stuck].sort())}`
+}
+
+// The old records a tidy-up merged or let expire but could not delete: where, so they can be
+// deleted by hand. They are not counted twice meanwhile.
+const stuckText = (dir: string, names: string[]): string => {
+  const shown = names.slice(0, 5).map(n => `    ${n}`)
+  if (names.length > 5) shown.push(`    … and ${names.length - 5} more`)
+  return [`  Could not delete old usage records (${names.length}). Delete them by hand from:`, `    ${dir}`, ...shown].join('\n')
 }
 
 async function poll($: Dollar): Promise<void> {
@@ -215,10 +408,11 @@ async function begin($: Dollar): Promise<void> {
   await save($, true).catch(() => {})
   await openLog($).catch(() => {
     logPath = undefined
-    log = emptyLog()
   })
+  // In the background: it waits on the lock and may read many files.
+  void tidy($).catch(() => {})
   await $.command
-    .register({ name: 'usage-stats', description: 'Tokens per model and limits used, by day', argumentHint: '[days | YYYY-MM-DD | today | yesterday]' })
+    .register({ name: 'usage-stats', description: 'Tokens per model and limits used, by day', argumentHint: '[days | YYYY-MM-DD | today | yesterday | help]' })
     .catch(() => {})
   await update($, base, () => null)
   // A new chat has none of the old one's agents.

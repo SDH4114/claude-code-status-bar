@@ -32,12 +32,18 @@ function world(on: On, now = Date.parse('2026-01-01T00:00:00Z')) {
     sessionId: 's1',
     // The file system the daily records go to, by absolute path.
     files: {} as Record<string, string>,
+    // When each file was last written; one never written counts as written now.
+    mtimes: {} as Record<string, number>,
+    rm: 'ok' as 'ok' | 'missing' | 'fails',
+    del: false,
+    delCalls: [] as string[],
   }
   on('session.id', () => ({ value: state.sessionId }))
   on('env.get', ($, e) => ({ value: e.name === 'HOME' ? '/home/me' : undefined }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('fs.write', ($, e) => {
     state.files[e.path] = e.text
+    state.mtimes[e.path] = clock.now()
     return { value: undefined }
   })
   on('fs.read', ($, e) => {
@@ -46,12 +52,28 @@ function world(on: On, now = Date.parse('2026-01-01T00:00:00Z')) {
     return { value: text }
   })
   on('fs.exists', ($, e) => ({ value: e.path in state.files }))
-  on('fs.list', ($, e) => ({
-    value: Object.keys(state.files)
+  on('fs.list', ($, e) => {
+    const now = clock.now()
+    const value = Object.keys(state.files)
       .filter(f => f.startsWith(`${e.path}/`))
-      .map(f => ({ name: f.slice(e.path.length + 1), kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false })),
-  }))
+      .map(f => ({ name: f.slice(e.path.length + 1), kind: 'file' as const, size: 0, mtimeMs: state.mtimes[f] ?? now, isLink: false }))
+    return { value }
+  })
   on('process.run', ($, e) => {
+    // rm: there (macOS, Linux), missing (Windows without Git's tools), or failing quietly.
+    if (e.argv[0] === 'rm') {
+      if (state.rm === 'missing') throw new Error('spawn rm ENOENT')
+      if (state.rm === 'ok') delete state.files[e.argv[3]!]
+      return { value: { exitCode: state.rm === 'ok' ? 0 : 1, stdout: '', stderr: '' } as never }
+    }
+    // PowerShell on Windows: the path, with backslashes, comes in the environment.
+    if (e.argv[0] === 'powershell') {
+      const path = e.init?.env?.CC_STATUS_BAR_FILE ?? ''
+      state.delCalls.push(path)
+      if (!state.del) throw new Error('spawn powershell ENOENT')
+      delete state.files[path.replace(/\\/g, '/')]
+      return { value: { exitCode: 0, stdout: '', stderr: '' } as never }
+    }
     state.gitCalls++
     if (state.branch === 'missing') throw new Error('spawn git ENOENT')
     const dir = e.init?.cwd
@@ -427,11 +449,15 @@ describe('usage stats', () => {
     await step($, 'low', 'agent-1', 'claude-opus-5-5')
     const text = await stats($, 'today')
     expect(text).toContain('Thu 1 Jan 2026')
-    expect(text).toMatch(/Opus 5\.5 +1 +40k +\$0\.32 +—/)
-    expect(text).toMatch(/Sonnet 5\.5 +2 +3k +\$0\.01/)
-    expect(text).toMatch(/total +3 +43k +\$0\.33/)
-    expect(await stats($)).toMatch(/Thu 1 Jan +3 +43k +\$0\.33/)
-    expect(Object.keys(state.files)).toEqual([`${dir}/s1.json`])
+    expect(text).toMatch(/model +req +input +output +cache +cost\n/)
+    expect(text).toMatch(/Opus 5\.5 +1 +30k +10k +0 +\$0\.32\n/)
+    expect(text).toMatch(/Sonnet 5\.5 +2 +2k +1k +0 +\$0\.01\n/)
+    expect(text).toMatch(/total +3 +32k +11k +0 +\$0\.33\n/)
+    expect(text).not.toContain('share')
+    const overview = await stats($)
+    expect(overview.split('\n')[0]).toBe('Usage by day')
+    expect(overview).toMatch(/Thu 1 Jan +3 +32k +11k +0 +\$0\.33/)
+    expect(Object.keys(state.files).filter(f => f.endsWith('.json'))).toEqual([`${dir}/s1-${noon}.json`])
   })
 
   test('adds up the limit a day used across readings and a new window', async ($, on) => {
@@ -453,7 +479,7 @@ describe('usage stats', () => {
     expect(await stats($)).toMatch(/Thu 1 Jan .* \+20% +\+3%/)
     const day = await stats($, '2026-01-01')
     // The first window rose from 10 to 25, the next one from 0 to 5.
-    expect(day).toMatch(/5h windows +used +max/)
+    expect(day).toMatch(/5h limit +used +max/)
     expect(day).toMatch(/\d\d:00 – \d\d:00 +\+15% +25%\n.*\+5% +5%/)
     expect(day).toMatch(/week \(resets Mon 5 Jan\) +\+3% +23%/)
   })
@@ -551,18 +577,18 @@ describe('usage stats', () => {
     state.usage = { ...state.usage, rateLimits: [] }
     await start($)
     const lines = (await stats($, 'today')).split('\n')
-    const head = lines.find(l => l.includes('tokens'))!
+    const head = lines.find(l => l.includes('output'))!
     const rows = lines.filter(l => /^  (Opus|Sonnet|total)/.test(l))
     expect(rows).toHaveLength(3)
     // Every figure ends where its heading ends.
-    for (const word of ['req', 'tokens', 'cost']) {
+    for (const word of ['req', 'input', 'output', 'cache', 'cost']) {
       const end = head.indexOf(word) + word.length
       for (const r of rows) expect([r[end - 1] !== ' ', r[end] ?? ' ']).toEqual([true, ' '])
     }
   })
 
-  test('goes on in the file of a resumed session and starts a new one after /clear', async ($, on) => {
-    const { state } = world(on, noon)
+  test('gives every run of a chat a file of its own and counts them all', async ($, on) => {
+    const { state, clock } = world(on, noon)
     state.files[`${dir}/s2.json`] = JSON.stringify({ v: 1, limits: [], days: {
       '2026-01-01': { 'Sonnet 5.5': { requests: 5, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
     } })
@@ -570,24 +596,218 @@ describe('usage stats', () => {
     state.stepUsage = tokens('claude-sonnet-5-5', 10, 10)
     await step($, 'high')
     await $.session.end({ reason: 'resume', sessionId: 's1', resume: {} } as never)
+    await clock.advance(1000)
     state.sessionId = 's2'
     await $.classic.SessionStart({ source: 'resume' } as never)
     await step($, 'high')
-    await stats($)
-    const days = (f: string) => JSON.parse(state.files[`${dir}/${f}.json`]!).days['2026-01-01']['Sonnet 5.5'].requests
-    expect(days('s1')).toBe(1)
-    expect(days('s2')).toBe(6)
+    const text = await stats($)
+    const requests = (f: string) => JSON.parse(state.files[`${dir}/${f}`]!).days['2026-01-01']['Sonnet 5.5'].requests
+    expect(requests(`s1-${noon}.json`)).toBe(1)
+    expect(requests(`s2-${noon + 1000}.json`)).toBe(1)
+    expect(requests('s2.json')).toBe(5)
+    expect(text).toMatch(/Thu 1 Jan +7 /)
   })
 
-  test('writes beside a file it cannot read instead of over it', async ($, on) => {
-    const { state } = world(on, noon)
-    state.files[`${dir}/s1.json`] = '{cut off'
+  test('goes on in a new file when a tidy-up took its file away', async ($, on) => {
+    const { state, clock } = world(on, noon)
     await start($)
     state.stepUsage = tokens('claude-sonnet-5-5', 10, 10)
     await step($, 'high')
     await stats($)
-    expect(state.files[`${dir}/s1.json`]).toBe('{cut off')
-    expect(Object.keys(state.files)).toContain(`${dir}/s1-${noon}.json`)
+    // What it held is in a month file now.
+    delete state.files[`${dir}/s1-${noon}.json`]
+    await clock.advance(1000)
+    await step($, 'high')
+    await stats($)
+    expect(state.files[`${dir}/s1-${noon}.json`]).toBeUndefined()
+    const file = JSON.parse(state.files[`${dir}/s1-${noon + 1000}.json`]!)
+    expect(file.days['2026-01-01']['Sonnet 5.5'].requests).toBe(1)
+  })
+
+  const day = (date: string, requests: number) =>
+    ({ [date]: { 'Haiku 5.5': { requests, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } } })
+  const twoDaysAgo = noon - 2 * 86_400_000
+
+  test('merges files older than a day into their months and drops months past half a year', async ($, on) => {
+    const { state, clock } = world(on, noon)
+    state.files[`${dir}/a.json`] = JSON.stringify({ v: 1, limits: [[twoDaysAgo, 'seven_day', 10, '']], days: day('2025-12-30', 2) })
+    state.files[`${dir}/b.json`] = JSON.stringify({ v: 1, limits: [], days: { ...day('2025-12-31', 3), ...day('2026-01-01', 4) } })
+    state.files[`${dir}/2025-12.json`] = JSON.stringify({ v: 1, limits: [], days: day('2025-12-01', 1) })
+    state.files[`${dir}/2025-01.json`] = JSON.stringify({ v: 1, limits: [], days: day('2025-01-15', 9) })
+    state.files[`${dir}/recent.json`] = JSON.stringify({ v: 1, limits: [], days: day('2026-01-01', 5) })
+    for (const f of ['a', 'b', '2025-12', '2025-01']) state.mtimes[`${dir}/${f}.json`] = twoDaysAgo
+    state.usage = { ...state.usage, rateLimits: [] }
+    await start($)
+    await clock.advance(1000)
+    const names = Object.keys(state.files).map(f => f.slice(dir.length + 1)).sort()
+    expect(names).toEqual(['2025-12.json', '2026-01.json', 'recent.json', 'tidy.lock'])
+    const dec = JSON.parse(state.files[`${dir}/2025-12.json`]!)
+    expect(Object.keys(dec.days).sort()).toEqual(['2025-12-01', '2025-12-30', '2025-12-31'])
+    expect(dec.limits).toHaveLength(1)
+    expect(dec.merged).toBeUndefined()
+    const text = await stats($)
+    expect(text).toMatch(/Thu 1 Jan +9 [^]*Wed 31 Dec 2025 +3 [^]*Tue 30 Dec 2025 +2 [^]*Mon 1 Dec 2025 +1 /)
+    expect(text).not.toContain('Jan 2025')
+  })
+
+  test('counts a merged file once when it could not be deleted', async ($, on) => {
+    const { state, clock } = world(on, noon)
+    state.rm = 'missing'
+    state.files[`${dir}/a.json`] = JSON.stringify({ v: 1, limits: [], days: day('2025-12-30', 2) })
+    state.mtimes[`${dir}/a.json`] = twoDaysAgo
+    state.usage = { ...state.usage, rateLimits: [] }
+    await start($)
+    await clock.advance(1000)
+    expect(state.files[`${dir}/a.json`]).toBeDefined()
+    expect(JSON.parse(state.files[`${dir}/2025-12.json`]!).merged).toEqual(['a.json'])
+    const text = await stats($)
+    expect(text).toMatch(/Tue 30 Dec 2025 +2 /)
+    expect(text).toContain(`Could not delete old usage records (1). Delete them by hand from:\n    ${dir}\n    a.json`)
+  })
+
+  test('deletes with PowerShell on Windows, where there is no rm', async ($, on) => {
+    const { state, clock } = world(on, noon)
+    state.rm = 'missing'
+    state.del = true
+    state.files[`${dir}/a.json`] = JSON.stringify({ v: 1, limits: [], days: day('2025-12-30', 2) })
+    state.mtimes[`${dir}/a.json`] = twoDaysAgo
+    state.usage = { ...state.usage, rateLimits: [] }
+    await start($)
+    await clock.advance(1000)
+    expect(state.delCalls).toEqual(['\\home\\me\\.claude\\cc-status-bar\\usage\\a.json'])
+    expect(state.files[`${dir}/a.json`]).toBeUndefined()
+    expect(await stats($)).not.toContain('Could not delete')
+  })
+
+  test('tries PowerShell when rm leaves the file there', async ($, on) => {
+    const { state, clock } = world(on, noon)
+    state.rm = 'fails'
+    state.del = true
+    state.files[`${dir}/a.json`] = JSON.stringify({ v: 1, limits: [], days: day('2025-12-30', 2) })
+    state.mtimes[`${dir}/a.json`] = twoDaysAgo
+    state.usage = { ...state.usage, rateLimits: [] }
+    await start($)
+    await clock.advance(1000)
+    expect(state.delCalls).toEqual(['\\home\\me\\.claude\\cc-status-bar\\usage\\a.json'])
+    expect(state.files[`${dir}/a.json`]).toBeUndefined()
+    expect(await stats($)).not.toContain('Could not delete')
+  })
+
+  // Two runs of the tidy-up: the lock is set back, as six hours later.
+  const tidyAgain = async ($: Engine, state: ReturnType<typeof world>['state'], clock: ReturnType<typeof world>['clock']) => {
+    delete state.files[`${dir}/tidy.lock`]
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: {} } as never)
+    await $.classic.SessionStart({ source: 'clear' } as never)
+    await clock.advance(1000)
+  }
+
+  test('does not merge a file again when deleting it failed', async ($, on) => {
+    const { state, clock } = world(on, noon)
+    state.rm = 'fails'
+    state.files[`${dir}/a.json`] = JSON.stringify({ v: 1, limits: [], days: day('2025-12-30', 2) })
+    state.mtimes[`${dir}/a.json`] = twoDaysAgo
+    state.usage = { ...state.usage, rateLimits: [] }
+    await start($)
+    await clock.advance(1000)
+    await tidyAgain($, state, clock)
+    const dec = JSON.parse(state.files[`${dir}/2025-12.json`]!)
+    expect(dec.days['2025-12-30']['Haiku 5.5'].requests).toBe(2)
+    expect(dec.merged).toEqual(['a.json'])
+    expect(await stats($, '2025-12-30')).toMatch(/Haiku 5\.5 +2 /)
+  })
+
+  test('counts a file in two months once each when only one month could be written', async ($, on) => {
+    const { state, clock } = world(on, noon)
+    state.files[`${dir}/b.json`] = JSON.stringify({ v: 1, limits: [], days: { ...day('2025-12-31', 3), ...day('2026-01-01', 4) } })
+    state.mtimes[`${dir}/b.json`] = twoDaysAgo
+    // The January file cannot be read, so January cannot take its part.
+    state.files[`${dir}/2026-01.json`] = '{cut off'
+    state.usage = { ...state.usage, rateLimits: [] }
+    await start($)
+    await clock.advance(1000)
+    expect(state.files[`${dir}/b.json`]).toBeDefined()
+    expect(JSON.parse(state.files[`${dir}/2025-12.json`]!).merged).toEqual(['b.json'])
+    const text = await stats($)
+    expect(text).toMatch(/Thu 1 Jan +4 [^]*Wed 31 Dec 2025 +3 /)
+    expect(text).not.toContain('Could not delete')
+    // January readable again: the next tidy-up adds only January's part.
+    state.files[`${dir}/2026-01.json`] = JSON.stringify({ v: 1, limits: [], days: {} })
+    await tidyAgain($, state, clock)
+    expect(state.files[`${dir}/b.json`]).toBeUndefined()
+    expect(await stats($)).toMatch(/Thu 1 Jan +4 [^]*Wed 31 Dec 2025 +3 /)
+  })
+
+  test('goes on in a new file after 20 idle hours, before a tidy-up may take the old one', async ($, on) => {
+    const { state, clock } = world(on, noon)
+    await start($)
+    state.stepUsage = tokens('claude-sonnet-5-5', 10, 10)
+    await step($, 'high')
+    await stats($)
+    // The ticker stopped, so the clock can jump 21 hours without 75,000 ticks.
+    await $.session.end({ reason: 'prompt_input_exit', sessionId: 's1', resume: {} } as never)
+    await clock.advance(21 * 3_600_000)
+    await step($, 'high')
+    await stats($)
+    const file = (t: number) => JSON.parse(state.files[`${dir}/s1-${t}.json`]!).days
+    expect(Object.keys(state.files).filter(f => /s1-\d+\.json$/.test(f))).toHaveLength(2)
+    expect(file(noon)['2026-01-01']['Sonnet 5.5'].requests).toBe(1)
+  })
+
+  test('leaves alone files it did not write', async ($, on) => {
+    const { state, clock } = world(on, noon)
+    state.files[`${dir}/notes&x.json`] = JSON.stringify({ v: 1, limits: [], days: day('2025-12-30', 2) })
+    state.mtimes[`${dir}/notes&x.json`] = twoDaysAgo
+    await start($)
+    await clock.advance(1000)
+    expect(state.files[`${dir}/notes&x.json`]).toBeDefined()
+    expect(state.files[`${dir}/2025-12.json`]).toBeUndefined()
+    expect(await stats($)).not.toContain('Dec')
+  })
+
+  test('keeps the last 6 months', async ($, on) => {
+    const { state, clock } = world(on, noon)
+    state.files[`${dir}/2025-07.json`] = JSON.stringify({ v: 1, limits: [], days: day('2025-07-31', 1) })
+    state.files[`${dir}/2025-08.json`] = JSON.stringify({ v: 1, limits: [], days: day('2025-08-01', 1) })
+    await start($)
+    await clock.advance(1000)
+    expect(state.files[`${dir}/2025-07.json`]).toBeUndefined()
+    expect(await stats($)).toContain('Fri 1 Aug 2025')
+  })
+
+  test('names the expired months it could not delete, five at most', async ($, on) => {
+    const { state, clock } = world(on, noon)
+    state.rm = 'fails'
+    for (let m = 1; m <= 7; m++) {
+      state.files[`${dir}/2025-0${m}.json`] = JSON.stringify({ v: 1, limits: [], days: day(`2025-0${m}-10`, 1) })
+    }
+    await start($)
+    await clock.advance(1000)
+    const text = await stats($)
+    expect(text).toContain('Could not delete old usage records (7)')
+    expect(text).toContain('    2025-05.json\n    … and 2 more')
+    expect(text).not.toContain('2025-06.json')
+  })
+
+  test('tidies up at most every 6 hours', async ($, on) => {
+    const { state, clock } = world(on, noon)
+    state.files[`${dir}/tidy.lock`] = JSON.stringify({ at: noon - 3_600_000, token: 'other' })
+    state.files[`${dir}/a.json`] = JSON.stringify({ v: 1, limits: [], days: day('2025-12-30', 2) })
+    state.mtimes[`${dir}/a.json`] = twoDaysAgo
+    await start($)
+    await clock.advance(1000)
+    expect(state.files[`${dir}/a.json`]).toBeDefined()
+    expect(state.files[`${dir}/2025-12.json`]).toBeUndefined()
+  })
+
+  test('leaves a month alone, and what would go in it, when the month cannot be read', async ($, on) => {
+    const { state, clock } = world(on, noon)
+    state.files[`${dir}/2025-12.json`] = '{cut off'
+    state.files[`${dir}/a.json`] = JSON.stringify({ v: 1, limits: [], days: day('2025-12-30', 2) })
+    for (const f of ['a', '2025-12']) state.mtimes[`${dir}/${f}.json`] = twoDaysAgo
+    await start($)
+    await clock.advance(1000)
+    expect(state.files[`${dir}/2025-12.json`]).toBe('{cut off')
+    expect(state.files[`${dir}/a.json`]).toBeDefined()
   })
 
   test('reads a bad day count as all days', async ($, on) => {
@@ -603,5 +823,9 @@ describe('usage stats', () => {
     expect(await stats($, '2025-12-30')).toContain('Tue 30 Dec 2025')
     expect(await stats($, '12-29')).toContain('Nothing recorded on 2026-12-29')
     expect(await stats($, 'yesterday')).toContain('Wed 31 Dec 2025')
+    expect(await stats($)).not.toContain('cache   ')
+    const help = await stats($, ' HELP ')
+    expect(help).toMatch(/cache +the earlier conversation/)
+    expect(help).not.toContain('Dec')
   })
 })

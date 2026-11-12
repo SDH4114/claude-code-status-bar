@@ -1,6 +1,6 @@
 {
   "name": "cc-status-bar",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "Status line on the prompt footer: model, reasoning effort, context tokens, cost per answer and session, 5-hour and weekly limits, git branch; per agent when an agent transcript is in view. /usage-stats: tokens per model and limits used, by day.",
   "author": { "name": "amikolabs.com", "url": "https://amikolabs.com" },
   "types": "./types/index.d.ts"

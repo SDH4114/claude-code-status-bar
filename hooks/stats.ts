@@ -15,12 +15,16 @@ export type Counts = {
 // One reading of a limit: when, which window, percent used, when that window resets.
 export type Sample = [at: number, kind: string, percent: number, resetsAt: string]
 
-// One session's record, saved as its own file so parallel sessions never write the same one.
+// One session's record, saved as its own file so parallel sessions never write the same one,
+// or one month's (YYYY-MM.json), where session files older than a day are merged.
 export type Log = {
   v: 1
   // Local day (YYYY-MM-DD) → model name → counts.
   days: Record<string, Record<string, Counts>>
   limits: Sample[]
+  // A month's: the session files merged into it. Such a file still on disk (its delete failed)
+  // is already counted here and is skipped.
+  merged?: string[]
 }
 
 // Maps keyed by names read from files: a "__proto__" key must stay a plain key.
@@ -72,6 +76,10 @@ export const parseLog = (text: string): Log => {
     }
   }
   if (Array.isArray(raw.limits)) log.limits = raw.limits.filter(isSample)
+  if (Array.isArray(raw.merged)) {
+    const names = raw.merged.filter((n): n is string => typeof n === 'string')
+    if (names.length > 0) log.merged = names
+  }
   return log
 }
 
@@ -84,6 +92,42 @@ const addInto = (to: Counts, from: Counts): void => {
   to.cacheRead += from.cacheRead
   to.cacheWrite += from.cacheWrite
   if (from.usd !== undefined) to.usd = (to.usd ?? 0) + from.usd
+}
+
+// Adds one record's days and limit readings to another's.
+export const mergeLog = (into: Log, from: Log): void => {
+  for (const [day, models] of Object.entries(from.days)) {
+    const d = (into.days[day] ??= dict())
+    for (const [name, c] of Object.entries(models)) addInto((d[name] ??= zero()), c)
+  }
+  into.limits.push(...from.limits)
+}
+
+export const isEmptyLog = (log: Log): boolean => Object.keys(log.days).length === 0 && log.limits.length === 0
+
+// A record cut by month (YYYY-MM): days by their date, limit readings by when they were taken.
+export const byMonth = (log: Log): Map<string, Log> => {
+  const months = new Map<string, Log>()
+  const month = (m: string) => {
+    let l = months.get(m)
+    if (!l) {
+      l = emptyLog()
+      months.set(m, l)
+    }
+    return l
+  }
+  for (const [day, models] of Object.entries(log.days)) month(day.slice(0, 7)).days[day] = models
+  for (const s of log.limits) month(dayOf(s[0]).slice(0, 7)).limits.push(s)
+  return months
+}
+
+export const monthFile = /^(\d{4}-\d{2})\.json$/
+
+// The month `back` months before the one `now` falls in, as YYYY-MM.
+export const monthBefore = (now: number, back: number): string => {
+  const d = new Date(now)
+  const total = d.getFullYear() * 12 + d.getMonth() - back
+  return `${Math.floor(total / 12)}-${pad2((total % 12) + 1)}`
 }
 
 // Counts one model response into the day it arrived on.
@@ -213,7 +257,10 @@ const clock = (ms: number) => {
 const pct = (n: number) => `${Math.round(n * 10) / 10}%`
 const plus = (n: number | undefined) => (n === undefined ? '—' : `+${pct(n)}`)
 const cost = (usd: number | undefined) => (usd === undefined ? '—' : money(usd))
-const tokensOf = (c: Counts) => c.input + c.output + c.cacheRead + c.cacheWrite
+// New tokens sent: uncached input and what was written to the cache. Cache reads are the
+// conversation sent again on every request; shown apart, they would swamp the rest.
+const inputOf = (c: Counts) => c.input + c.cacheWrite
+const tokenCells = (c: Counts) => [compact(inputOf(c)), compact(c.output), compact(c.cacheRead)]
 
 const total = (models: Record<string, Counts>): Counts => {
   const t = zero()
@@ -232,7 +279,24 @@ const table = (head: string[], body: string[][], foot: string[][] = []): string[
   return [line(head), ...body.map(line), ...(foot.length ? [`  ${'─'.repeat(width)}`, ...foot.map(line)] : [])]
 }
 
-const note = 'cost ≈ API list price'
+// /usage-stats help: the arguments, and what each column means.
+const help = [
+  'Usage by day',
+  '',
+  '  /usage-stats              every recorded day',
+  '  /usage-stats 7            the last 7 recorded days',
+  '  /usage-stats today        one day by model (also yesterday, 2026-11-12, 11-12)',
+  '  /usage-stats help         this help',
+  '',
+  '  req     model requests (the session and its agents)',
+  '  input   new tokens sent',
+  '  output  tokens written by the model',
+  '  cache   the earlier conversation, re-read on every request (far cheaper than input)',
+  '  cost    input + output + cache at API list price; on a subscription it is not billed',
+  '  5h      how much of the 5-hour limit the day used',
+  '  week    how much of the weekly limit the day used',
+  '  max     the highest the limit stood at that day',
+].join('\n')
 
 // Every day on one row: requests, tokens, cost and limits used, then the average and the total.
 const overview = (days: readonly DayStats[], thisYear: number): string => {
@@ -241,7 +305,7 @@ const overview = (days: readonly DayStats[], thisYear: number): string => {
     return [
       dateText(d.day, thisYear),
       String(t.requests),
-      compact(tokensOf(t)),
+      ...tokenCells(t),
       cost(t.usd),
       plus(d.limits.five_hour?.used),
       plus(d.limits.seven_day?.used),
@@ -259,34 +323,38 @@ const overview = (days: readonly DayStats[], thisYear: number): string => {
           [
             'avg / day',
             String(Math.round(sums.requests / n)),
-            compact(Math.round(tokensOf(sums) / n)),
+            compact(Math.round(inputOf(sums) / n)),
+            compact(Math.round(sums.output / n)),
+            compact(Math.round(sums.cacheRead / n)),
             priced ? money((sums.usd ?? 0) / n) : '—',
             plus(avg(used('five_hour'))),
             plus(avg(used('seven_day'))),
           ],
           // 5-hour windows follow one another: their percents do not add up to anything.
-          [`total (${n} days)`, String(sums.requests), compact(tokensOf(sums)), cost(sums.usd), '', plus(sum(used('seven_day')))],
+          [`total (${n} days)`, String(sums.requests), ...tokenCells(sums), cost(sums.usd), '', plus(sum(used('seven_day')))],
         ]
       : []
-  return [...table(['', 'req', 'tokens', 'cost', '5h', 'week'], rows, foot), '', `  ${note}`].join('\n')
+  // A title first: the engine puts the plugin's name before the first line.
+  return [
+    'Usage by day',
+    '',
+    ...table(['', 'req', 'input', 'output', 'cache', 'cost', '5h', 'week'], rows, foot),
+  ].join('\n')
 }
 
-// One day: each model with its share of the 5-hour use, then the windows the limits were used in.
+// One day: each model's requests, tokens and cost, then the windows the limits were used in.
 const dayView = (d: DayStats, thisYear: number): string => {
   const t = total(d.models)
   const five = d.limits.five_hour
   const week = d.limits.seven_day
-  // The API does not say which model used the limit: it is shared out by cost, as an estimate.
-  const share = (c: Counts) =>
-    five && five.used > 0 && t.usd ? `≈${Math.round(((c.usd ?? 0) / t.usd) * 100)}%` : '—'
   const models = Object.entries(d.models).sort((a, b) => (b[1].usd ?? 0) - (a[1].usd ?? 0))
   const out = [dateText(d.day, thisYear, true), '']
   if (models.length > 0) {
     out.push(
       ...table(
-        ['model', 'req', 'tokens', 'cost', '5h share'],
-        models.map(([name, c]) => [name, String(c.requests), compact(tokensOf(c)), cost(c.usd), share(c)]),
-        [['total', String(t.requests), compact(tokensOf(t)), cost(t.usd), '']],
+        ['model', 'req', 'input', 'output', 'cache', 'cost'],
+        models.map(([name, c]) => [name, String(c.requests), ...tokenCells(c), cost(c.usd)]),
+        models.length > 1 ? [['total', String(t.requests), ...tokenCells(t), cost(t.usd)]] : [],
       ),
       '',
     )
@@ -308,18 +376,20 @@ const dayView = (d: DayStats, thisYear: number): string => {
     if (limits.length > 0) limits.push(['', '', ''])
     limits.push([`week${resets}`, week.used > 0 ? `+${pct(week.used)}` : '—', pct(week.peak)])
   }
-  if (limits.length > 0) out.push(...table([five?.windows.length ? '5h windows' : 'limits', 'used', 'max'], limits), '')
-  out.push(`  ${note}`)
-  return out.join('\n')
+  // used: what the limit rose by that day; max: the highest it stood at.
+  if (limits.length > 0) out.push(...table([five?.windows.length ? '5h limit' : 'limits', 'used', 'max'], limits))
+  return out.join('\n').trimEnd()
 }
 
 const empty = 'No usage recorded yet: cc-status-bar counts responses from the moment it is installed.'
 
 // The /usage-stats answer for its argument: nothing for every day, a number for the last that
-// many recorded days, a date (YYYY-MM-DD, MM-DD, today, yesterday) for that day in detail.
+// many recorded days, a date (YYYY-MM-DD, MM-DD, today, yesterday) for that day in detail,
+// help for what the columns mean.
 export const formatStats = (all: readonly DayStats[], arg: string, now: number): string => {
   const thisYear = new Date(now).getFullYear()
   const a = arg.trim().toLowerCase()
+  if (a === 'help') return help
   const day =
     a === 'today'
       ? dayOf(now)

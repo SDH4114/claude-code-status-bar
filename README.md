@@ -53,47 +53,44 @@ Works on macOS, Linux and Windows; the branch needs `git` on `PATH`. On a narrow
 
 ## Usage by day
 
-`/usage-stats` shows one row per recorded day, newest first: requests, tokens (input, output and cache together), estimated cost, and how much of the 5-hour and weekly limits the day used. With more than one day it adds the average per day and the total.
+`/usage-stats` shows one row per recorded day, newest first, with the average per day and the total when there is more than one day.
 
 ```
-                  req  tokens   cost    5h  week
-  Thu 12 Nov       15    499k  $0.44  +23%   +1%
-  Wed 11 Nov       92    3.5M  $3.36  +61%   +9%
-  ──────────────────────────────────────────────
-  avg / day        54      2M  $1.90  +42%   +5%
-  total (2 days)  107      4M  $3.80        +10%
+Usage by day
 
-  cost ≈ API list price
+                  req  input  output  cache   cost    5h  week
+  Thu 12 Nov       15    88k     11k   400k  $0.44  +23%   +1%
+  Wed 11 Nov       92   364k     71k     3M  $3.36  +61%   +9%
+  ────────────────────────────────────────────────────────────
+  avg / day        54   226k     41k   1.7M  $1.90  +42%   +5%
+  total (2 days)  107   452k     82k   3.4M  $3.80        +10%
 ```
 
-`/usage-stats 2026-11-12` (also `11-12`, `today`, `yesterday`) shows one day in detail: each model, and the windows the limits were used in.
+`/usage-stats 2026-11-12` (also `11-12`, `today`, `yesterday`) shows one day by model, and the 5-hour windows the limit was used in.
 
 ```
 Thu 12 Nov 2026
 
-  model       req  tokens    cost  5h share
-  Opus 5.5      5    293k   $0.30      ≈67%
-  Sonnet 5.5    6    138k   $0.14      ≈32%
-  Haiku 5.5     4     68k  <$0.01       ≈1%
-  ─────────────────────────────────────────
-  total        15    499k   $0.44
+  model       req  input  output  cache    cost
+  Opus 5.5      5    41k      2k   250k   $0.30
+  Sonnet 5.5    6    27k      6k   105k   $0.14
+  Haiku 5.5     4    20k      3k    45k  <$0.01
+  ─────────────────────────────────────────────
+  total        15    88k     11k   400k   $0.44
 
-  5h windows                used  max
+  5h limit                  used  max
   10:00 – 15:00             +23%  23%
 
   week (resets Tue 17 Nov)   +1%  48%
-
-  cost ≈ API list price
 ```
 
-`/usage-stats 7` shows the last 7 recorded days (days with no use are skipped, not counted).
+`/usage-stats 7` shows the last 7 recorded days (days with no use are skipped, not counted). `/usage-stats help` lists the arguments and what each column means.
 
-- Every model response is counted, the main conversation's and every agent's, under the day it arrived (local time).
-- `cost` is the API list price of the tokens, as for agents above (cache writes at the 5-minute rate), so it can differ from `/cost`.
-- `+23%` is how much the limit's percent rose that day, summed over its windows (a new window counts from 0); `max` is the highest reading. Use outside Claude Code (claude.ai, another machine) shows up on the next reading here. The 5-hour column has no total: its windows follow one another, and their percents do not add up.
-- `5h share` is an estimate: the API does not say which model used the limit, so the day's 5-hour use is shared out by each model's cost.
-- Counting starts when the plugin is installed: there is no history from before.
-- Records are one JSON file per session in `~/.claude/cc-status-bar/usage/` (`$CLAUDE_CONFIG_DIR/cc-status-bar/usage/` when set), written at most every 10 seconds. Delete the folder to start over.
+- `input`: new tokens sent (uncached input and cache writes). `output`: tokens the model wrote. `cache`: the earlier conversation, which every request sends again and the prompt cache serves; it is most of the tokens of a long chat, and far cheaper than input.
+- `cost`: all of these at API list price (cache writes at the 5-minute rate, as for agents above), so it can differ from `/cost`. On a subscription it is what the same use would cost on the API, not a bill.
+- `5h` / `week` / `used`: how much the limit's percent rose that day, summed over its windows (a new window counts from 0); `max` is the highest reading. Use outside Claude Code (claude.ai, another machine) shows up on the next reading here. The 5-hour column has no total: its windows follow one another, and their percents do not add up.
+- Every model response is counted, the main conversation's and every agent's, under the day it arrived (local time). Counting starts when the plugin is installed: there is no history from before.
+- Records live in `~/.claude/cc-status-bar/usage/` (`$CLAUDE_CONFIG_DIR/cc-status-bar/usage/` when set): each run of a chat writes its own small JSON file, at most every 10 seconds. At most every 6 hours, on a session start, files older than a day are merged into one file per month (`2026-11.json`) and deleted, and months older than the last 6 are deleted. A chat idle for 20 hours goes on in a new file, so the tidy-up never takes a file still in use. Only files the plugin writes are merged or deleted. Deleting uses `rm` (macOS, Linux), or PowerShell's `Remove-Item` on Windows when `rm` is missing or fails. If a file cannot be deleted, it is not counted twice, and `/usage-stats` names it and the folder so it can be deleted by hand. Delete the folder to start over.
 
 ## Install
 
