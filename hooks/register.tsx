@@ -175,8 +175,7 @@ async function statsText($: Dollar, args: string): Promise<string> {
       // A broken file is skipped rather than hiding every other day.
     }
   }
-  const n = Number.parseInt(args.trim(), 10)
-  return formatStats(aggregate(logs), n > 0 ? n : undefined)
+  return formatStats(aggregate(logs), args, await $.clock.now())
 }
 
 async function poll($: Dollar): Promise<void> {
@@ -219,7 +218,7 @@ async function begin($: Dollar): Promise<void> {
     log = emptyLog()
   })
   await $.command
-    .register({ name: 'usage-stats', description: 'Tokens per model and limits used, by day', argumentHint: '[days]' })
+    .register({ name: 'usage-stats', description: 'Tokens per model and limits used, by day', argumentHint: '[days | YYYY-MM-DD | today | yesterday]' })
     .catch(() => {})
   await update($, base, () => null)
   // A new chat has none of the old one's agents.

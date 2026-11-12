@@ -120,8 +120,12 @@ export const recordLimits = (log: Log, now: number, limits: readonly Limit[], la
   return added
 }
 
-// How much of a limit a day used up, and the highest reading that day.
-export type DayLimit = { used: number; peak: number }
+// One limit window's share of a day: what it rose by that day and its highest reading.
+// resets is NaN for a window the API gave no reset time for.
+export type Window = { resets: number; used: number; peak: number }
+
+// How much of a limit a day used up, its highest reading, and the windows it fell in.
+export type DayLimit = { used: number; peak: number; windows: Window[] }
 
 export type DayStats = {
   day: string
@@ -154,53 +158,62 @@ export const aggregate = (logs: readonly Log[]): DayStats[] => {
     }
   }
   const samples = logs.flatMap(l => l.limits).sort((a, b) => a[0] - b[0])
+  // resets is the window's first-seen reset time, so a few seconds of drift keep one window.
   const state = new Map<string, { resets: number; max: number }>()
   for (const [at, kind, percent, resetsAt] of samples) {
     const resets = Date.parse(resetsAt)
     const prev = state.get(kind)
     let used = 0
+    let current = { resets, max: percent }
     if (prev) {
       const known = !Number.isNaN(resets) && !Number.isNaN(prev.resets)
       const shift = known ? resets - prev.resets : 0
       if (shift < -sameWindowMs || (!known && percent < prev.max)) continue
       if (shift > sameWindowMs) {
         used = percent
-        state.set(kind, { resets, max: percent })
       } else {
         used = Math.max(0, percent - prev.max)
-        state.set(kind, { resets: Number.isNaN(resets) ? prev.resets : resets, max: Math.max(prev.max, percent) })
+        current = { resets: Number.isNaN(prev.resets) ? resets : prev.resets, max: Math.max(prev.max, percent) }
       }
-    } else {
-      state.set(kind, { resets, max: percent })
     }
-    const l = (dayStats(dayOf(at)).limits[kind] ??= { used: 0, peak: 0 })
+    state.set(kind, current)
+    const l = (dayStats(dayOf(at)).limits[kind] ??= { used: 0, peak: 0, windows: [] })
     l.used += used
     l.peak = Math.max(l.peak, percent)
+    let w = l.windows.find(x => Object.is(x.resets, current.resets))
+    if (!w) {
+      w = { resets: current.resets, used: 0, peak: 0 }
+      l.windows.push(w)
+    }
+    w.used += used
+    w.peak = Math.max(w.peak, percent)
   }
   return [...days.values()].sort((a, b) => (a.day < b.day ? 1 : -1))
 }
 
-const pct = (n: number) => `${Math.round(n * 10) / 10}%`
+// ---- The /usage-stats text ----
 
-const limitText = (d: DayStats): string => {
-  const parts: string[] = []
-  const five = d.limits.five_hour
-  const week = d.limits.seven_day
-  if (five) parts.push(`5h +${pct(five.used)} (peak ${pct(five.peak)})`)
-  if (week) parts.push(`week +${pct(week.used)} (peak ${pct(week.peak)})`)
-  return parts.join(' · ')
+const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+// "Thu 12 Nov", with the year when asked for or when it is not this year's.
+const dateText = (day: string, thisYear: number, withYear = false): string => {
+  const [y, m, d] = day.split('-').map(Number) as [number, number, number]
+  const weekday = weekdays[new Date(Date.UTC(y, m - 1, d)).getUTCDay()]
+  const text = `${weekday} ${d} ${months[m - 1]}`
+  return withYear || y !== thisYear ? `${text} ${y}` : text
 }
 
-// One table row's cells: the name, then the figures, each right-aligned in its column.
-const cells = (name: string, c: Counts): string[] => [
-  name,
-  `${c.requests} req`,
-  `in ${compact(c.input)}`,
-  `out ${compact(c.output)}`,
-  `cache r ${compact(c.cacheRead)}`,
-  `w ${compact(c.cacheWrite)}`,
-  c.usd === undefined ? '' : `≈${money(c.usd)}`,
-]
+const pad2h = (n: number) => String(n).padStart(2, '0')
+const clock = (ms: number) => {
+  const t = new Date(ms)
+  return `${pad2h(t.getHours())}:${pad2h(t.getMinutes())}`
+}
+
+const pct = (n: number) => `${Math.round(n * 10) / 10}%`
+const plus = (n: number | undefined) => (n === undefined ? '—' : `+${pct(n)}`)
+const cost = (usd: number | undefined) => (usd === undefined ? '—' : money(usd))
+const tokensOf = (c: Counts) => c.input + c.output + c.cacheRead + c.cacheWrite
 
 const total = (models: Record<string, Counts>): Counts => {
   const t = zero()
@@ -208,41 +221,120 @@ const total = (models: Record<string, Counts>): Counts => {
   return t
 }
 
-const byCost = (models: Record<string, Counts>) =>
-  Object.entries(models).sort((a, b) => (b[1].usd ?? 0) - (a[1].usd ?? 0))
+// A table: a header, body rows, then a rule and the closing rows. The first column is
+// left-aligned, the rest right-aligned, two spaces apart.
+const table = (head: string[], body: string[][], foot: string[][] = []): string[] => {
+  const all = [head, ...body, ...foot]
+  const widths = head.map((_, i) => Math.max(...all.map(r => (r[i] ?? '').length)))
+  const line = (r: string[]) =>
+    `  ${r.map((c, i) => (i === 0 ? c.padEnd(widths[i]!) : c.padStart(widths[i]!))).join('  ')}`.trimEnd()
+  const width = widths.reduce((a, b) => a + b, 0) + 2 * (widths.length - 1)
+  return [line(head), ...body.map(line), ...(foot.length ? [`  ${'─'.repeat(width)}`, ...foot.map(line)] : [])]
+}
 
-// The /usage-stats text: every recorded day newest first (or the last `limit` of them), then the total.
-export const formatStats = (all: readonly DayStats[], limit?: number): string => {
-  const days = limit ? all.slice(0, limit) : all
-  if (days.length === 0) return 'No usage recorded yet: cc-status-bar counts responses from the moment it is installed.'
-  // Lines are headings (strings) or table rows (cells), so every row can share column widths.
-  const out: (string | string[])[] = []
-  const sum = dict<Counts>()
-  for (const d of days) {
-    const head = limitText(d)
-    out.push(head ? `${d.day} · ${head}` : d.day)
-    const models = byCost(d.models)
-    for (const [name, c] of models) {
-      out.push(cells(name, c))
-      addInto((sum[name] ??= zero()), c)
-    }
-    if (models.length > 1) out.push(cells('all', total(d.models)))
-    out.push('')
-  }
-  const totals = byCost(sum)
-  if (totals.length > 0) {
-    const span = days.length === 1 ? days[0]!.day : `${days[days.length - 1]!.day} … ${days[0]!.day}`
-    out.push(`Total ${span}`)
-    for (const [name, c] of totals) out.push(cells(name, c))
-    if (totals.length > 1) out.push(cells('all', total(sum)))
-    out.push('')
-  }
-  out.push('≈$ at API list price (cache writes at the 5-minute rate). Limits: what the percent rose by that day.')
-  const rows = out.filter((l): l is string[] => Array.isArray(l))
-  const widths = (rows[0] ?? []).map((_, i) => Math.max(...rows.map(r => r[i]!.length)))
-  return out
-    .map(l =>
-      typeof l === 'string' ? l : `  ${l.map((cell, i) => (i === 0 ? cell.padEnd(widths[i]!) : cell.padStart(widths[i]!))).join('  ')}`.trimEnd(),
+const note = 'cost ≈ API list price'
+
+// Every day on one row: requests, tokens, cost and limits used, then the average and the total.
+const overview = (days: readonly DayStats[], thisYear: number): string => {
+  const rows = days.map(d => {
+    const t = total(d.models)
+    return [
+      dateText(d.day, thisYear),
+      String(t.requests),
+      compact(tokensOf(t)),
+      cost(t.usd),
+      plus(d.limits.five_hour?.used),
+      plus(d.limits.seven_day?.used),
+    ]
+  })
+  const n = days.length
+  const sums = total(Object.fromEntries(days.map(d => [d.day, total(d.models)])))
+  const priced = days.some(d => total(d.models).usd !== undefined)
+  const used = (kind: string) => days.map(d => d.limits[kind]?.used).filter((u): u is number => u !== undefined)
+  const avg = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : undefined)
+  const sum = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) : undefined)
+  const foot =
+    n > 1
+      ? [
+          [
+            'avg / day',
+            String(Math.round(sums.requests / n)),
+            compact(Math.round(tokensOf(sums) / n)),
+            priced ? money((sums.usd ?? 0) / n) : '—',
+            plus(avg(used('five_hour'))),
+            plus(avg(used('seven_day'))),
+          ],
+          // 5-hour windows follow one another: their percents do not add up to anything.
+          [`total (${n} days)`, String(sums.requests), compact(tokensOf(sums)), cost(sums.usd), '', plus(sum(used('seven_day')))],
+        ]
+      : []
+  return [...table(['', 'req', 'tokens', 'cost', '5h', 'week'], rows, foot), '', `  ${note}`].join('\n')
+}
+
+// One day: each model with its share of the 5-hour use, then the windows the limits were used in.
+const dayView = (d: DayStats, thisYear: number): string => {
+  const t = total(d.models)
+  const five = d.limits.five_hour
+  const week = d.limits.seven_day
+  // The API does not say which model used the limit: it is shared out by cost, as an estimate.
+  const share = (c: Counts) =>
+    five && five.used > 0 && t.usd ? `≈${Math.round(((c.usd ?? 0) / t.usd) * 100)}%` : '—'
+  const models = Object.entries(d.models).sort((a, b) => (b[1].usd ?? 0) - (a[1].usd ?? 0))
+  const out = [dateText(d.day, thisYear, true), '']
+  if (models.length > 0) {
+    out.push(
+      ...table(
+        ['model', 'req', 'tokens', 'cost', '5h share'],
+        models.map(([name, c]) => [name, String(c.requests), compact(tokensOf(c)), cost(c.usd), share(c)]),
+        [['total', String(t.requests), compact(tokensOf(t)), cost(t.usd), '']],
+      ),
+      '',
     )
-    .join('\n')
+  }
+  // The windows and the week share one table, so their used and max columns line up.
+  const limits: string[][] = []
+  if (five && five.windows.length > 0) {
+    for (const w of five.windows) {
+      limits.push([
+        Number.isNaN(w.resets) ? 'unknown' : `${clock(w.resets - 5 * 3_600_000)} – ${clock(w.resets)}`,
+        w.used > 0 ? `+${pct(w.used)}` : '—',
+        pct(w.peak),
+      ])
+    }
+  }
+  if (week) {
+    const last = week.windows[week.windows.length - 1]
+    const resets = last && !Number.isNaN(last.resets) ? ` (resets ${dateText(dayOf(last.resets), thisYear)})` : ''
+    if (limits.length > 0) limits.push(['', '', ''])
+    limits.push([`week${resets}`, week.used > 0 ? `+${pct(week.used)}` : '—', pct(week.peak)])
+  }
+  if (limits.length > 0) out.push(...table([five?.windows.length ? '5h windows' : 'limits', 'used', 'max'], limits), '')
+  out.push(`  ${note}`)
+  return out.join('\n')
+}
+
+const empty = 'No usage recorded yet: cc-status-bar counts responses from the moment it is installed.'
+
+// The /usage-stats answer for its argument: nothing for every day, a number for the last that
+// many recorded days, a date (YYYY-MM-DD, MM-DD, today, yesterday) for that day in detail.
+export const formatStats = (all: readonly DayStats[], arg: string, now: number): string => {
+  const thisYear = new Date(now).getFullYear()
+  const a = arg.trim().toLowerCase()
+  const day =
+    a === 'today'
+      ? dayOf(now)
+      : a === 'yesterday'
+        ? dayOf(now - 86_400_000)
+        : /^\d{4}-\d{2}-\d{2}$/.test(a)
+          ? a
+          : /^\d{2}-\d{2}$/.test(a)
+            ? `${thisYear}-${a}`
+            : undefined
+  if (day !== undefined) {
+    const d = all.find(x => x.day === day)
+    return d ? dayView(d, thisYear) : `Nothing recorded on ${day}.`
+  }
+  const n = Number.parseInt(a, 10)
+  const days = n > 0 ? all.slice(0, n) : all
+  return days.length === 0 ? empty : overview(days, thisYear)
 }

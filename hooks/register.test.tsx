@@ -425,11 +425,12 @@ describe('usage stats', () => {
     await step($, 'high')
     state.stepUsage = tokens('claude-opus-5-5', 30_000, 10_000)
     await step($, 'low', 'agent-1', 'claude-opus-5-5')
-    const text = await stats($)
-    expect(text).toContain('2026-01-01')
-    expect(text).toMatch(/Sonnet 5\.5 +2 req +in 2k +out 1k/)
-    expect(text).toMatch(/Opus 5\.5 +1 req +in 30k +out 10k .*≈\$0\.32/)
-    expect(text).toMatch(/all +3 req/)
+    const text = await stats($, 'today')
+    expect(text).toContain('Thu 1 Jan 2026')
+    expect(text).toMatch(/Opus 5\.5 +1 +40k +\$0\.32 +—/)
+    expect(text).toMatch(/Sonnet 5\.5 +2 +3k +\$0\.01/)
+    expect(text).toMatch(/total +3 +43k +\$0\.33/)
+    expect(await stats($)).toMatch(/Thu 1 Jan +3 +43k +\$0\.33/)
     expect(Object.keys(state.files)).toEqual([`${dir}/s1.json`])
   })
 
@@ -449,8 +450,12 @@ describe('usage stats', () => {
     // A new 5-hour window counts from 0.
     set(5, 23, '2026-01-01T20:00:00Z')
     await clock.advance(1000)
-    const text = await stats($)
-    expect(text).toContain('5h +20% (peak 25%) · week +3% (peak 23%)')
+    expect(await stats($)).toMatch(/Thu 1 Jan .* \+20% +\+3%/)
+    const day = await stats($, '2026-01-01')
+    // The first window rose from 10 to 25, the next one from 0 to 5.
+    expect(day).toMatch(/5h windows +used +max/)
+    expect(day).toMatch(/\d\d:00 – \d\d:00 +\+15% +25%\n.*\+5% +5%/)
+    expect(day).toMatch(/week \(resets Mon 5 Jan\) +\+3% +23%/)
   })
 
   test('merges the files of several sessions and keeps a resumed one', async ($, on) => {
@@ -466,9 +471,10 @@ describe('usage stats', () => {
     state.stepUsage = tokens('claude-sonnet-5-5', 10, 10)
     await step($, 'high')
     const text = await stats($)
-    expect(text).toMatch(/2026-01-01[^]*Sonnet 5\.5 +2 req[^]*2025-12-31[^]*Haiku 5\.5 +4 req/)
-    expect(text).toContain('Total 2025-12-31 … 2026-01-01')
-    expect(await stats($, '1')).not.toContain('Haiku')
+    expect(text).toMatch(/Thu 1 Jan +2 [^]*Wed 31 Dec 2025 +4 /)
+    expect(text).toMatch(/avg \/ day +3 /)
+    expect(text).toMatch(/total \(2 days\) +6 /)
+    expect(await stats($, '1')).not.toContain('Dec')
   })
 
   test('says so when nothing is recorded', async ($, on) => {
@@ -493,7 +499,8 @@ describe('usage stats', () => {
     state.usage = { ...state.usage, rateLimits: [] }
     await start($)
     // +10 to 80, then a new window from 0 to 10.
-    expect(await stats($)).toContain('5h +20% (peak 80%)')
+    expect(await stats($)).toMatch(/Thu 1 Jan .* \+20% +—/)
+    expect(await stats($, 'today')).toMatch(/\+10% +80%\n.*\+10% +10%/)
   })
 
   test('takes a reset time a few seconds off as the same window', async ($, on) => {
@@ -505,7 +512,8 @@ describe('usage stats', () => {
     ] })
     state.usage = { ...state.usage, rateLimits: [] }
     await start($)
-    expect(await stats($)).toContain('week +2% (peak 42%)')
+    expect(await stats($)).toMatch(/Thu 1 Jan .* — +\+2%/)
+    expect(await stats($, 'today')).toMatch(/week \(resets Mon 5 Jan\) +\+2% +42%/)
   })
 
   test('does not record a reading of a window that has already reset', async ($, on) => {
@@ -527,8 +535,8 @@ describe('usage stats', () => {
     state.files[`${dir}/null.json`] = 'null'
     state.usage = { ...state.usage, rateLimits: [] }
     await start($)
-    const text = await stats($)
-    expect(text).toMatch(/Opus 5\.5 +2 req/)
+    const text = await stats($, 'today')
+    expect(text).toMatch(/Opus 5\.5 +2 /)
     expect(text).not.toContain('NaN')
     expect(text).not.toContain('Junk')
     expect(({} as Record<string, unknown>).requests).toBeUndefined()
@@ -542,10 +550,15 @@ describe('usage stats', () => {
     } } })
     state.usage = { ...state.usage, rateLimits: [] }
     await start($)
-    const rows = (await stats($)).split('\n').filter(l => / req /.test(l))
-    const at = (l: string, word: string) => l.indexOf(word) + word.length
-    expect(new Set(rows.map(l => at(l, ' req'))).size).toBe(1)
-    expect(new Set(rows.map(l => l.search(/out \S+/) + l.match(/out \S+/)![0].length)).size).toBe(1)
+    const lines = (await stats($, 'today')).split('\n')
+    const head = lines.find(l => l.includes('tokens'))!
+    const rows = lines.filter(l => /^  (Opus|Sonnet|total)/.test(l))
+    expect(rows).toHaveLength(3)
+    // Every figure ends where its heading ends.
+    for (const word of ['req', 'tokens', 'cost']) {
+      const end = head.indexOf(word) + word.length
+      for (const r of rows) expect([r[end - 1] !== ' ', r[end] ?? ' ']).toEqual([true, ' '])
+    }
   })
 
   test('goes on in the file of a resumed session and starts a new one after /clear', async ($, on) => {
@@ -585,7 +598,10 @@ describe('usage stats', () => {
     } })
     state.usage = { ...state.usage, rateLimits: [] }
     await start($)
-    for (const arg of ['abc', '0', '-3']) expect(await stats($, arg)).toContain('2025-12-30')
-    expect(await stats($, '1')).not.toContain('2025-12-30')
+    for (const arg of ['abc', '0', '-3']) expect(await stats($, arg)).toContain('Tue 30 Dec 2025')
+    expect(await stats($, '1')).not.toContain('Tue 30 Dec')
+    expect(await stats($, '2025-12-30')).toContain('Tue 30 Dec 2025')
+    expect(await stats($, '12-29')).toContain('Nothing recorded on 2026-12-29')
+    expect(await stats($, 'yesterday')).toContain('Wed 31 Dec 2025')
   })
 })
