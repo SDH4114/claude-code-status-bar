@@ -3,7 +3,7 @@
 A light status bar for Claude Code. It sits on the line under the prompt, next to `⏵⏵ auto mode on`, in the same color. Subagents and teammates get a line of their own (see [Per-agent line](#per-agent-line)):
 
 
-![](bar.png)
+![](main.png)
 
 ```
 ⏵⏵ auto mode on (shift+tab to cycle)  │  Sonnet 5.5 │ high │ ctx 14k/200k 7% │ $0.12 / $1.84 │ 4% ↻1h0m │ 13% ↻3d4h │ main
@@ -25,9 +25,9 @@ Limits show on a Claude subscription only, after the first model response.
 
 Each subagent and teammate has its own line. When you open an agent's transcript from the tasks list, the footer switches to that agent within a second and shows its own model, effort, context, cost and branch. Two agents running side by side, one on Haiku and one on Sonnet:
 
-![](agent-haiku.png)
+![](sub1.png)
 
-![](agent-sonnet.png)
+![](sub2.png)
 
 ```
 Sonnet longer test … │ Sonnet 5.5 │ medium │ ctx 74k │ ≈$0.23 / $0.23 │ main
@@ -67,6 +67,8 @@ Usage by day
 ```
 
 `/usage-stats 2026-11-12` (also `11-12`, `today`, `yesterday`) shows one day by model, and the 5-hour windows the limit was used in.
+
+![](stats.png)
 
 ```
 Thu 12 Nov 2026
